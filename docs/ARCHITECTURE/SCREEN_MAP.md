@@ -1,0 +1,1 @@
+# SCREEN_MAP\nHome/Heroes/Battle/Shop/More. Hero Info shows Skills + Gear slots.\n
