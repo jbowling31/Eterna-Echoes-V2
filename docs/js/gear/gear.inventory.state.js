@@ -1,4 +1,4 @@
-import { uid } from "../_util.js";
+import { uid } from "../util.js";
 import { GEAR_CATALOG } from "./gear.catalog.data.js";
 export const gearInventoryState = { cap: 200, items: [] };
 export function invCount(){ return gearInventoryState.items.length; }
