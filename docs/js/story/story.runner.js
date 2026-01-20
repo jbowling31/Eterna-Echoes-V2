@@ -3,6 +3,7 @@ import { openModal, closeModal } from "../ui/ui.modal.js";
 import { CH01 } from "./chapters/ch01.steps.js";
 import { HEROES } from "../heroes/heroes.data.js";
 import { unlockHero, getHeroProg } from "../heroes/hero.progress.state.js";
+import { startBattle } from "../battle/battle.ui.js";
 
 // ============================================================
 // Story Runner (Chapter Select + Fullscreen Pacing Overlay)
@@ -251,6 +252,7 @@ function defaultStore() {
     completed: {},
     progress: {},
     flags: {},
+    battleWins: {},
   };
 }
 
@@ -262,6 +264,7 @@ function loadStore() {
   s.completed = s.completed && typeof s.completed === "object" ? s.completed : {};
   s.progress = s.progress && typeof s.progress === "object" ? s.progress : {};
   s.flags = s.flags && typeof s.flags === "object" ? s.flags : {};
+  s.battleWins = s.battleWins && typeof s.battleWins === "object" ? s.battleWins : {};
   return s;
 }
 
@@ -454,24 +457,20 @@ export function mountStory(hostIdOrEl) {
 
     reconcileHeroUnlocksFromStoryState();
 
-    window.addEventListener("EE_STORY_BATTLE_RESULT", (ev) => {
-      const d = ev?.detail || {};
-      if (!d.battleId) return;
-      if (!run.waitingBattleId || d.battleId !== run.waitingBattleId) return;
+    const handleBattleResultDetail = (d) => {
+      const payload = d || {};
+      if (!payload.battleId) return;
+      if (!run.waitingBattleId || payload.battleId !== run.waitingBattleId) return;
 
       const chId = run.chapterId;
       const segNow = getSegment();
       const beatNow = getBeat();
 
-      if (d.won) {
-        applyBattleUnlocks(chId, d.battleId);
+      if (payload.won) {
+        applyBattleUnlocks(chId, payload.battleId);
 
         if (segNow?.next) setProgressSegment(chId, segNow.next);
 
-        const ch = CHAPTER_DATA?.[chId];
-        if (ch?.completeOnBattleId && d.battleId === ch.completeOnBattleId) {
-          markChapterComplete(chId);
-        }
 
         run.waitingBattleId = null;
 
@@ -484,14 +483,36 @@ export function mountStory(hostIdOrEl) {
         return;
       }
 
-      if (d.canceled || d.aborted || d.won === false) {
+      if (payload.canceled || payload.aborted || payload.won === false) {
         run.waitingBattleId = null;
         waitForModalOpenThenCloseThen(() => {
           showOverlay(true);
           render();
         });
       }
+    };
+
+    // Legacy / external battle screen contract
+    window.addEventListener("EE_STORY_BATTLE_RESULT", (ev) => {
+      handleBattleResultDetail(ev?.detail || {});
     });
+
+    // Direct battle UI contract (battle.ui.js can dispatch this)
+    window.addEventListener("EE_BATTLE_RESOLVED", (ev) => {
+      const raw = ev?.detail || {};
+      const battleId = raw.battleId;
+      const r = raw.result || {};
+      const d = { battleId };
+
+      if (typeof r.won === "boolean") d.won = r.won;
+      else if (r.winner === "heroes") d.won = true;
+      else if (r.winner === "enemies") d.won = false;
+      else if (r.canceled || r.aborted) d.canceled = true;
+      else d.canceled = true;
+
+      handleBattleResultDetail(d);
+    });
+
   }
 }
 
@@ -887,18 +908,45 @@ function skipToFinalBattle() {
 function requestBattle(battleId) {
   run.waitingBattleId = battleId;
 
+  // Hide pacing overlay while the battle UI takes over.
   showOverlay(false);
 
-  window.dispatchEvent(
-    new CustomEvent("EE_STORY_REQUEST_BATTLE", {
-      detail: {
-        chapterId: run.chapterId,
-        segmentId: run.segmentId,
-        battleId,
-      },
-    }),
-  );
+  // Preferred: call the local battle UI directly.
+  let started = false;
+  try {
+    if (typeof startBattle === "function") {
+      startBattle(battleId);
+      started = true;
+
+      // Optional: broadcast that the story started a battle (non-starting event).
+      window.dispatchEvent(
+        new CustomEvent("EE_STORY_BATTLE_STARTED", {
+          detail: {
+            chapterId: run.chapterId,
+            segmentId: run.segmentId,
+            battleId,
+          },
+        }),
+      );
+    }
+  } catch (err) {
+    console.warn("[STORY] startBattle failed; falling back to EE_STORY_REQUEST_BATTLE", err);
+  }
+
+  // Fallback: keep old contract for any external battle screen handler.
+  if (!started) {
+    window.dispatchEvent(
+      new CustomEvent("EE_STORY_REQUEST_BATTLE", {
+        detail: {
+          chapterId: run.chapterId,
+          segmentId: run.segmentId,
+          battleId,
+        },
+      }),
+    );
+  }
 }
+
 
 function render() {
   const chId = run.chapterId;

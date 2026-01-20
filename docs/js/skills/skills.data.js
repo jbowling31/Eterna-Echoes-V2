@@ -162,13 +162,17 @@ dorun_s1:{
     text:"Moderate fire damage. 10% chance to Burn.",
     status:{ name:"Burn", chance:10, turns:2, target:"enemy" },
   },
-  vireon_s1:{
-    id:"vireon_s1", heroId:"vireon", slot:"Skill 1", name:"Magma Aegis",
-    kind:"shield", scaleStat:"DEF", basePct:60, perLevelPct:6,
-    cdTurns:2, energyCost:0,
-    text:"Grants a Fire Shield that absorbs damage and reflects 20% back.",
-    status:{ name:"Reflect", chance:100, turns:2, target:"self" },
-  },
+vireon_s1:{
+  id:"vireon_s1", heroId:"vireon", slot:"Skill 1", name:"Magma Aegis",
+  kind:"utility",
+  cdTurns:3,
+  target:"self",
+  shield:{ base: 18, hpPct: 0.08 },  // whatever you use
+  reflectPct: 0.20,                 // 20% reflect
+  reflectTurns: 2,                  // how long reflect lasts
+  text:"Gain a Fire Shield and reflect 20% damage for 2 turns."
+},
+
   vireon_s2:{
     id:"vireon_s2", heroId:"vireon", slot:"Skill 2", name:"Flame Pulse",
     kind:"damage", scaleStat:"ATK", basePct:85, perLevelPct:7,
@@ -176,12 +180,25 @@ dorun_s1:{
     text:"Small AoE damage and reduces enemy Attack for 1 turn.",
     status:{ name:"ATK Down", chance:100, turns:1, target:"all_enemies" },
   },
-  vireon_u:{
-    id:"vireon_u", heroId:"vireon", slot:"Ultimate", name:"Phoenix Barrier",
-    kind:"utility", scaleStat:null, basePct:0, perLevelPct:0,
-    cdTurns:4, energyCost:100,
-    text:"Revives Vireon once per loop with 40% HP and Taunts for 1 turn.",
+vireon_u:{
+  id:"vireon_u", heroId:"vireon", slot:"Ultimate", name:"Phoenix Barrier",
+  kind:"hybrid",
+  cdTurns:4, energyCost:100,
+
+  // Mechanics (used by battle.engine.js)
+  target:"all_enemies",        // purely UI hint
+  dmgAll: {                    // damage ALL enemies
+    base: 28,                  // tweak: base damage
+    atkPct: 0.85               // tweak: scales from Vireon's ATK
   },
+  shieldAll: {                 // shield ALL allies
+    base: 22,                  // tweak: flat shield
+    hpPct: 0.10                // tweak: scales from Vireon's max HP
+  },
+
+  text:"Blasts all enemies and grants a Phoenix Shield to all allies.",
+},
+
 
   // ===== Sirenia (SR) =====
   sirenia_basic:{
@@ -289,3 +306,414 @@ dorun_s1:{
 });
 
 export function getSkillDef(skillId){ return SKILLS[skillId]; }
+
+// ==============================
+// Enemy skill catalog (seed)
+// ==============================
+// NOTE: This is intentionally small and battle-focused.
+// You can grow this per enemy type over time.
+
+export const ENEMY_SKILLS = Object.freeze({
+  // ===== Shroudspawn =====
+  e_shroudspawn_claw: {
+    id:"e_shroudspawn_claw",
+    ownerId:"shroudspawn_grunt",
+    name:"Claw Swipe",
+    kind:"damage",
+    basePct:85,
+    perLevelPct:0,
+    cdTurns:0,
+    energyCost:0,
+    text:"A brutal swipe at a single target.",
+    status:{ name:"Bleed", chance:15, turns:2, target:"enemy" },
+  },
+
+  e_shroudspawn_void_spit: {
+    id:"e_shroudspawn_void_spit",
+    ownerId:"shroudspawn_grunt",
+    name:"Void Spit",
+    kind:"damage",
+    basePct:95,
+    perLevelPct:0,
+    cdTurns:2,
+    energyCost:0,
+    text:"A corrosive spit that can ignite the target's nerves.",
+    status:{ name:"Burn", chance:35, turns:2, target:"enemy" },
+  },
+
+  e_shroudspawn_pack_howl: {
+    id:"e_shroudspawn_pack_howl",
+    ownerId:"shroudspawn_grunt",
+    name:"Pack Howl",
+    kind:"buff",
+    basePct:0,
+    perLevelPct:0,
+    cdTurns:3,
+    energyCost:0,
+    text:"Rallies allies, raising their Defense briefly.",
+    status:{ name:"DEF Up", chance:100, turns:1, target:"all_allies" },
+  },
+
+  e_scout_pounce: {
+    id:"e_scout_pounce",
+    ownerId:"shroudspawn_scout",
+    name:"Pounce",
+    kind:"damage",
+    basePct:90,
+    perLevelPct:0,
+    cdTurns:2,
+    energyCost:0,
+    text:"A fast lunge that can stun.",
+    status:{ name:"Stun", chance:25, turns:1, target:"enemy" },
+  },
+
+  // ===== Ghosts / Wraiths =====
+  e_ghost_drain: {
+    id:"e_ghost_drain",
+    ownerId:"spawn_ghost",
+    name:"Soul Drain",
+    kind:"damage",
+    basePct:85,
+    perLevelPct:0,
+    cdTurns:2,
+    energyCost:0,
+    lifestealPct: 0.35,
+    text:"Drains vitality and heals for a percent of damage dealt.",
+  },
+
+  e_ghost_wail: {
+    id:"e_ghost_wail",
+    ownerId:"spawn_ghost",
+    name:"Hollow Wail",
+    kind:"damage",
+    basePct:70,
+    perLevelPct:0,
+    cdTurns:3,
+    energyCost:0,
+    targetMode:"all_enemies",
+    text:"A wail that hits all enemies and weakens them.",
+    status:{ name:"ATK Down", chance:50, turns:1, target:"all_enemies" },
+  },
+
+  e_wraith_lament: {
+    id:"e_wraith_lament",
+    ownerId:"echo_wraith",
+    name:"Wraith Lament",
+    kind:"damage",
+    basePct:75,
+    perLevelPct:0,
+    cdTurns:3,
+    energyCost:0,
+    targetMode:"all_enemies",
+    text:"Sends a wave of memory fog through all enemies.",
+    status:{ name:"ATK Down", chance:35, turns:1, target:"all_enemies" },
+  },
+
+  e_wraith_freeze_touch: {
+    id:"e_wraith_freeze_touch",
+    ownerId:"echo_wraith",
+    name:"Cold Touch",
+    kind:"damage",
+    basePct:85,
+    perLevelPct:0,
+    cdTurns:3,
+    energyCost:0,
+    text:"A chilling strike that can freeze.",
+    status:{ name:"Freeze", chance:25, turns:1, target:"enemy" },
+  },
+
+  // ===== Echo Leaper =====
+  e_leaper_dive: {
+    id:"e_leaper_dive",
+    ownerId:"echo_leaper",
+    name:"Sky Dive",
+    kind:"damage",
+    basePct:115,
+    perLevelPct:0,
+    cdTurns:2,
+    energyCost:0,
+    text:"A high-speed dive from above.",
+  },
+
+  e_leaper_trip: {
+    id:"e_leaper_trip",
+    ownerId:"echo_leaper",
+    name:"Trip Slash",
+    kind:"damage",
+    basePct:85,
+    perLevelPct:0,
+    cdTurns:3,
+    energyCost:0,
+    text:"A low slash that can stun.",
+    status:{ name:"Stun", chance:20, turns:1, target:"enemy" },
+  },
+
+  // ===== Glyphspawn =====
+  e_glyph_pulse: {
+    id:"e_glyph_pulse",
+    ownerId:"glyphspawn_elite",
+    name:"Glyph Pulse",
+    kind:"damage",
+    basePct:80,
+    perLevelPct:0,
+    cdTurns:3,
+    energyCost:0,
+    targetMode:"all_enemies",
+    text:"A pulsing shockwave across the field.",
+  },
+
+  e_glyph_ult_lock: {
+    id:"e_glyph_ult_lock",
+    ownerId:"glyphspawn_elite",
+    name:"Seal the Echo",
+    kind:"debuff",
+    basePct:0,
+    perLevelPct:0,
+    cdTurns:4,
+    energyCost:0,
+    targetMode:"all_enemies",
+    text:"Temporarily locks enemy ultimates.",
+    status:{ name:"Ult Lock", chance:100, turns:1, target:"all_enemies" },
+  },
+
+  // ===== Spore Beast =====
+  e_spore_bloom: {
+    id:"e_spore_bloom",
+    ownerId:"spore_beast",
+    name:"Toxic Bloom",
+    kind:"damage",
+    basePct:75,
+    perLevelPct:0,
+    cdTurns:3,
+    energyCost:0,
+    targetMode:"all_enemies",
+    text:"Releases spores that sting the lungs.",
+    status:{ name:"ATK Down", chance:40, turns:1, target:"all_enemies" },
+  },
+
+  e_spore_shield: {
+    id:"e_spore_shield",
+    ownerId:"spore_beast",
+    name:"Spore Shield",
+    kind:"buff",
+    basePct:0,
+    perLevelPct:0,
+    cdTurns:4,
+    energyCost:0,
+    text:"Hardens into a protective spore shell.",
+    shield:{ base: 40, hpPct: 0.06 },
+    status:{ name:"DEF Up", chance:100, turns:1, target:"self" },
+    targetMode:"self",
+  },
+
+  // ===== Hatchlings / Casters =====
+  e_hatchling_bite: {
+    id:"e_hatchling_bite",
+    ownerId:"shroud_hatchling",
+    name:"Razor Bite",
+    kind:"damage",
+    basePct:95,
+    perLevelPct:0,
+    cdTurns:1,
+    energyCost:0,
+    text:"A quick bite that can cause bleeding.",
+    status:{ name:"Bleed", chance:25, turns:2, target:"enemy" },
+  },
+
+  e_caster_hex: {
+    id:"e_caster_hex",
+    ownerId:"shroud_caster",
+    name:"Hex Bolt",
+    kind:"damage",
+    basePct:95,
+    perLevelPct:0,
+    cdTurns:2,
+    energyCost:0,
+    text:"A bolt that scrambles timing and weakens attack.",
+    status:{ name:"ATK Down", chance:40, turns:1, target:"enemy" },
+  },
+
+  e_caster_barrier: {
+    id:"e_caster_barrier",
+    ownerId:"shroud_caster",
+    name:"Barrier Sigil",
+    kind:"support",
+    basePct:0,
+    perLevelPct:0,
+    cdTurns:3,
+    energyCost:0,
+    text:"Raises a protective barrier on an ally.",
+    shield:{ base: 55, hpPct: 0.04 },
+  },
+
+  // ===== Mirrorforms =====
+  e_mirror_reflect: {
+    id:"e_mirror_reflect",
+    ownerId:"mirrorling",
+    name:"Reflect Stance",
+    kind:"utility",
+    basePct:0,
+    perLevelPct:0,
+    cdTurns:4,
+    energyCost:0,
+    text:"Takes a stance that reflects a portion of incoming damage.",
+    reflectPct: 0.20,
+    targetMode:"self",
+  },
+
+  e_mirror_burst: {
+    id:"e_mirror_burst",
+    ownerId:"mirrorling",
+    name:"Echo Burst",
+    kind:"damage",
+    basePct:78,
+    perLevelPct:0,
+    cdTurns:3,
+    energyCost:0,
+    targetMode:"all_enemies",
+    text:"A burst of refracted force hits all enemies.",
+  },
+
+  // ===== Broodmother =====
+  e_broodmother_slam: {
+    id:"e_broodmother_slam",
+    ownerId:"shroud_broodmother",
+    name:"Nest Slam",
+    kind:"damage",
+    basePct:110,
+    perLevelPct:0,
+    cdTurns:3,
+    energyCost:0,
+    text:"A crushing slam that can stun.",
+    status:{ name:"Stun", chance:20, turns:1, target:"enemy" },
+  },
+
+  e_broodmother_spawn: {
+    id:"e_broodmother_spawn",
+    ownerId:"shroud_broodmother",
+    name:"Eggburst",
+    kind:"buff",
+    basePct:0,
+    perLevelPct:0,
+    cdTurns:4,
+    energyCost:0,
+    text:"Fortifies itself as the nest surges.",
+    status:{ name:"DEF Up", chance:100, turns:1, target:"self" },
+    targetMode:"self",
+    shield:{ base: 80, hpPct: 0.05 },
+  },
+
+  // ===== Glitchspawn =====
+  e_glitch_rewrite_blast: {
+    id:"e_glitch_rewrite_blast",
+    ownerId:"glitchspawn_caster",
+    name:"Rewrite Blast",
+    kind:"damage",
+    basePct:95,
+    perLevelPct:0,
+    cdTurns:1,
+    energyCost:0,
+    targetMode:"all_enemies",
+    text:"A repeating blast that interferes with skills.",
+    status:{ name:"Loop Lock", chance:25, turns:1, target:"all_enemies" },
+  },
+
+  // ===== Warden =====
+  e_warden_cleave: {
+    id:"e_warden_cleave",
+    ownerId:"shroud_warden",
+    name:"Warden Cleave",
+    kind:"damage",
+    basePct:105,
+    perLevelPct:0,
+    cdTurns:2,
+    energyCost:0,
+    text:"A heavy cleave at a single target.",
+  },
+
+  e_warden_guard: {
+    id:"e_warden_guard",
+    ownerId:"shroud_warden",
+    name:"Fortify",
+    kind:"buff",
+    basePct:0,
+    perLevelPct:0,
+    cdTurns:3,
+    energyCost:0,
+    text:"Raises defenses and gains a shield.",
+    targetMode:"self",
+    status:{ name:"DEF Up", chance:100, turns:1, target:"self" },
+    shield:{ base: 90, hpPct: 0.05 },
+  },
+
+  e_warden_stun_slam: {
+    id:"e_warden_stun_slam",
+    ownerId:"shroud_warden",
+    name:"Shock Slam",
+    kind:"damage",
+    basePct:95,
+    perLevelPct:0,
+    cdTurns:3,
+    energyCost:0,
+    text:"A ground slam that can stun.",
+    status:{ name:"Stun", chance:30, turns:1, target:"enemy" },
+  },
+
+  // ===== Herald =====
+  e_herald_void_lance: {
+    id:"e_herald_void_lance",
+    ownerId:"shroud_herald",
+    name:"Void Lance",
+    kind:"damage",
+    basePct:120,
+    perLevelPct:0,
+    cdTurns:2,
+    energyCost:0,
+    text:"A spear of void energy through a single target.",
+  },
+
+  e_herald_loop_lock: {
+    id:"e_herald_loop_lock",
+    ownerId:"shroud_herald",
+    name:"Loop Lock",
+    kind:"debuff",
+    basePct:0,
+    perLevelPct:0,
+    cdTurns:4,
+    energyCost:0,
+    targetMode:"all_enemies",
+    text:"Disrupts the loop, preventing non-basic skills briefly.",
+    status:{ name:"Loop Lock", chance:100, turns:1, target:"all_enemies" },
+  },
+
+  e_herald_nova: {
+    id:"e_herald_nova",
+    ownerId:"shroud_herald",
+    name:"Herald Nova",
+    kind:"damage",
+    basePct:85,
+    perLevelPct:0,
+    cdTurns:3,
+    energyCost:0,
+    targetMode:"all_enemies",
+    text:"A nova of corruption hits all enemies.",
+    status:{ name:"ATK Down", chance:30, turns:1, target:"all_enemies" },
+  },
+
+  e_herald_ult_lock: {
+    id:"e_herald_ult_lock",
+    ownerId:"shroud_herald",
+    name:"Silence the Ultimate",
+    kind:"debuff",
+    basePct:0,
+    perLevelPct:0,
+    cdTurns:5,
+    energyCost:0,
+    targetMode:"all_enemies",
+    text:"Locks enemy ultimates.",
+    status:{ name:"Ult Lock", chance:100, turns:1, target:"all_enemies" },
+  },
+});
+
+
+export function getEnemySkillDef(skillId){ return ENEMY_SKILLS[skillId]; }
