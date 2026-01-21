@@ -1,0 +1,958 @@
+// docs/js/battle/battle.ui.js
+// Final-Fantasy-style battle UI:
+// - Two vertical columns on the battlefield (heroes left, enemies right).
+// - Command window (Attack/Skills/Items/Guard/Flee) for the active hero.
+// - Skill submenu (Basic + S1 + S2 + Ultimate) then target select then Execute.
+// - Auto toggle applies to everyone.
+//
+// Contract with story.runner.js:
+// - startBattle(battleId) opens UI
+// - dispatches EE_BATTLE_RESOLVED and EE_STORY_BATTLE_RESULT when finished.
+
+import { getBattleDef } from "./battles.ch01.js";
+import { createBattleEngine } from "./battle.engine.js";
+import { HEROES } from "../heroes/heroes.data.js";
+import { isUnlocked } from "../heroes/hero.progress.state.js";
+import { getSkillDef } from "../skills/skills.data.js";
+import { openModal, closeModal } from "../ui/ui.modal.js";
+import { openTeamBuilder } from "../ui/team.builder.ui.js";
+import { getTeam, setTeam, setActiveMode, TEAM_MODES, validateTeam } from "../teams/team.builder.state.js";
+import { applyRewards } from "../economy/rewards.apply.logic.js";
+
+const HERO_ART_BASE = "./assets/heroes/portraits/";
+const HERO_ART_TEMPLATE = "hero_{id}_p.png";
+
+let UI = null;
+let engine = null;
+let battleCtx = null; // { battleId, mode, teamIds }
+let rewardsApplied = false;
+
+// UI flow state
+let uiMode = "cmd"; // cmd | skills | target | flee
+let pendingAction = null; // { kind, skillId?, label }
+let selectedTarget = { side: "enemy", idx: 0, mode: "single" }; // mode: single | all_enemies | all_allies
+let autoOn = false;
+let autoTimer = null;
+
+/* =========================
+   AOE helpers (minimal add)
+========================= */
+function isAoeMode(m){ return m === "all_enemies" || m === "all_allies"; }
+
+function includesAny(hay, arr){
+  const s = String(hay || "").toLowerCase();
+  return arr.some(x => s.includes(String(x).toLowerCase()));
+}
+
+// More forgiving target inference so Sirenia (heal/buff) works even if target fields are missing.
+function getSkillTargetSpec(def){
+  const kind = String(def?.kind || "").toLowerCase();
+  const txt = String(def?.text || def?.desc || "").toLowerCase();
+
+  // 1) Explicit fields first
+  const raw = def?.target ?? def?.status?.target ?? "";
+  const t = String(raw || "").toLowerCase().trim();
+
+  // Normalize common synonyms (explicit)
+  if (["all_allies","all_players","all_heroes","all_party","all_team","team","party"].includes(t)) return "all_allies";
+  if (["all_enemies","all_enemy"].includes(t)) return "all_enemies";
+  if (["self","me"].includes(t)) return "self";
+  if (t.includes("ally")) return "ally"; // ally, ally_random, single_ally, random_ally, etc.
+
+  // 2) Structural AOE hints (some skills use these instead of status.target)
+  if (def?.dmgAll) return "all_enemies";
+  if (def?.shieldAll || def?.healAll || def?.buffAll) return "all_allies";
+
+  // 3) Text + kind heuristics (covers Sirenia)
+  const saysAlliesAll = includesAny(txt, ["all allies","all heroes","entire party","whole party","party","team","all party","all team"]);
+  const saysEnemiesAll = includesAny(txt, ["all enemies","all foes","all opponents"]);
+
+  if (saysEnemiesAll) return "all_enemies";
+
+  if (kind === "heal"){
+    // Default heals are hero-side; if it reads like a party heal, treat as all_allies.
+    if (saysAlliesAll || txt.includes("heal all")) return "all_allies";
+    return "ally";
+  }
+
+  if (kind === "buff" || kind === "support" || kind === "utility"){
+    // Default buffs are hero-side; if it reads party-wide, treat as all_allies.
+    if (saysAlliesAll || txt.includes("allies") || txt.includes("party") || txt.includes("team")) return "all_allies";
+    return "ally";
+  }
+
+  // Default to enemy single
+  return "enemy";
+}
+
+function inferTargetSideForSkill(def){
+  const t = getSkillTargetSpec(def);
+  if (t === "self") return "hero";
+  if (t === "all_allies") return "hero";
+  if (t === "ally") return "hero";
+  return "enemy";
+}
+
+export function ensureBattleHost(){
+  if (document.getElementById("eeBattleHost")) return;
+
+  const host = document.createElement("div");
+  host.id = "eeBattleHost";
+  host.innerHTML = `
+    <div class="eeB" role="dialog" aria-modal="true" aria-label="Battle">
+      <div class="eeBTop">
+        <div class="eeBTitleWrap">
+          <div class="eeBTitle" id="eeBTitle">Battle</div>
+          <div class="eeBSub" id="eeBSub">—</div>
+        </div>
+
+        <div class="eeBTopRight">
+          <button class="eeBMini" id="eeBAuto" title="Auto (applies to everyone)">AUTO: OFF</button>
+          <button class="eeBMini" id="eeBLogBtn" title="Toggle log">LOG</button>
+          <button class="eeBX" id="eeBClose" aria-label="Close">✕</button>
+        </div>
+      </div>
+
+      <div class="eeBStage" id="eeBStage">
+        <div class="eeBBackdrop" id="eeBBackdrop"></div>
+        <div class="eeBShade"></div>
+
+        <div class="eeBArena">
+          <div class="eeBCol eeBColHeroes" id="eeBHeroes"></div>
+          <div class="eeBCol eeBColEnemies" id="eeBEnemies"></div>
+        </div>
+
+        <div class="eeBCommand">
+          <div class="eeBActive" id="eeBActive"></div>
+          <div class="eeBWindow" id="eeBWindow"></div>
+        </div>
+
+        <div class="eeBLog" id="eeBLog" style="display:none"></div>
+
+        <div class="eeBEnd" id="eeBEnd" style="display:none;">
+          <div class="eeBEndTitle" id="eeBEndTitle">Victory</div>
+          <div class="eeBEndDesc" id="eeBEndDesc"></div>
+          <button class="eeBBtn primary" id="eeBEndContinue">Continue</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(host);
+  injectStyles();
+}
+
+export function startBattle(battleId){
+  ensureBattleHost();
+
+  const def = getBattleDef(battleId);
+  if (!def){
+    console.warn("[BATTLE] Unknown battleId:", battleId);
+    dispatchResolved(battleId, { won:true, winner:"heroes", devSkip:true });
+    return;
+  }
+
+  // Story battles should always confirm team selection so rewards/XPs apply to the right heroes.
+  const mode = TEAM_MODES.GLOBAL;
+
+  openConfirmTeamForBattle({ battleId, def, mode });
+}
+
+function openConfirmTeamForBattle({ battleId, def, mode }){
+  const idsRaw = (getTeam(mode) || []).filter(Boolean);
+  const isStoryBattle = true;
+  const ids = idsRaw.filter(id => !isStoryBattle || isUnlocked(id));
+
+  const listHtml = renderConfirmHeroList(ids);
+  const title = "Confirm Team";
+
+  openModal(title, `
+    <div class="card">
+      <div class="spread">
+        <div>
+          <div class="h2">${escapeHtml(def.name || "Battle")}</div>
+          <div class="muted">Pick your party, then start.</div>
+          <div class="muted" style="margin-top:6px;">Mode: <b>${escapeHtml(String(mode))}</b> • Party size: 1–4</div>
+        </div>
+      </div>
+    </div>
+    <div style="height:12px"></div>
+    ${listHtml}
+    <div style="height:12px"></div>
+    <div class="row wrap">
+      <button class="btn" data-edit-team>Edit Team</button>
+      <button class="btn" data-cancel>Cancel</button>
+      <button class="btn primary" data-start ${ids.length < 1 ? "disabled" : ""}>Start Battle</button>
+    </div>
+    ${ids.length < 1 ? `<div style="height:10px"></div><div class="muted">Pick at least 1 unlocked hero to start.</div>` : ``}
+  `);
+
+  const host = document.getElementById("modalHost");
+
+  host?.querySelector("[data-cancel]")?.addEventListener("click", () => {
+    closeModal();
+    dispatchResolved(battleId, { canceled:true, aborted:true });
+  });
+
+  host?.querySelector("[data-edit-team]")?.addEventListener("click", () => {
+    closeModal();
+    openTeamBuilder({
+      mode,
+      onDone: () => openConfirmTeamForBattle({ battleId, def, mode }),
+    });
+  });
+
+  host?.querySelector("[data-start]")?.addEventListener("click", () => {
+    const idsNow = (getTeam(mode) || [])
+      .filter(Boolean)
+      .filter(id => isUnlocked(id))
+      .slice(0, 4);
+
+    const v = validateTeam ? validateTeam(idsNow, mode) : { ok: idsNow.length > 0 };
+    if (!v.ok) {
+      const reason = v.reason || "Invalid team.";
+      const warn = document.createElement("div");
+      warn.className = "muted";
+      warn.style.marginTop = "10px";
+      warn.innerHTML = `⚠️ ${escapeHtml(reason)}`;
+      host?.querySelector(".modalBody")?.appendChild(warn);
+      return;
+    }
+
+    closeModal();
+    beginBattle({ battleId, def, mode, teamIds: idsNow });
+  });
+}
+
+function renderConfirmHeroList(ids){
+  if (!ids?.length) return `<div class="card"><div class="muted">No heroes selected.</div></div>`;
+  return `
+    <div class="card">
+      <div class="muted">Selected (${ids.length}):</div>
+      <div style="height:8px"></div>
+      ${ids.map(id => {
+        const h = (HEROES || []).find(x => x.id === id);
+        return `<div class="muted">• <b>${escapeHtml(h?.name || id)}</b></div>`;
+      }).join("")}
+    </div>
+  `;
+}
+
+function beginBattle({ battleId, def, mode, teamIds }){
+  setActiveMode?.(mode);
+  setTeam?.(teamIds, mode);
+
+  battleCtx = { battleId, mode, teamIds };
+  rewardsApplied = false;
+
+  engine = createBattleEngine({ battleDef: def, teamIds });
+
+  UI = {
+    host: document.getElementById("eeBattleHost"),
+    title: document.getElementById("eeBTitle"),
+    sub: document.getElementById("eeBSub"),
+    close: document.getElementById("eeBClose"),
+    auto: document.getElementById("eeBAuto"),
+    logBtn: document.getElementById("eeBLogBtn"),
+    backdrop: document.getElementById("eeBBackdrop"),
+    heroes: document.getElementById("eeBHeroes"),
+    enemies: document.getElementById("eeBEnemies"),
+    active: document.getElementById("eeBActive"),
+    window: document.getElementById("eeBWindow"),
+    log: document.getElementById("eeBLog"),
+    end: document.getElementById("eeBEnd"),
+    endTitle: document.getElementById("eeBEndTitle"),
+    endDesc: document.getElementById("eeBEndDesc"),
+    endContinue: document.getElementById("eeBEndContinue"),
+  };
+
+  UI.title.textContent = def.name || "Battle";
+  UI.backdrop.style.backgroundImage = `url("${def.backdrop}")`;
+
+  UI.host.classList.add("on");
+
+  UI.close.onclick = () => {
+    stopAuto();
+    UI.host.classList.remove("on");
+    dispatchResolved(battleId, { canceled:true, aborted:true });
+  };
+
+  UI.logBtn.onclick = () => {
+    const show = UI.log.style.display === "none";
+    UI.log.style.display = show ? "block" : "none";
+  };
+
+  UI.auto.onclick = () => {
+    autoOn = !autoOn;
+    UI.auto.textContent = autoOn ? "AUTO: ON" : "AUTO: OFF";
+    if (autoOn) tickAuto();
+    else stopAuto();
+    render();
+  };
+
+  // Click targets when we're in target mode (ignore clicks if AoE is selected)
+  UI.enemies.onclick = (ev) => {
+    const el = ev.target.closest("[data-eidx]");
+    if (!el) return;
+    if (uiMode !== "target") return;
+    if (isAoeMode(selectedTarget?.mode)) return;
+    const idx = Number(el.getAttribute("data-eidx"));
+    if (!Number.isFinite(idx)) return;
+    if (!engine?.state?.enemies?.[idx] || engine.state.enemies[idx].hp <= 0) return;
+    selectedTarget = { side:"enemy", idx, mode:"single" };
+    render();
+  };
+
+  UI.heroes.onclick = (ev) => {
+    const el = ev.target.closest("[data-hidx]");
+    if (!el) return;
+    if (uiMode !== "target") return;
+    if (isAoeMode(selectedTarget?.mode)) return;
+    const idx = Number(el.getAttribute("data-hidx"));
+    if (!Number.isFinite(idx)) return;
+    if (!engine?.state?.heroes?.[idx] || engine.state.heroes[idx].hp <= 0) return;
+    selectedTarget = { side:"hero", idx, mode:"single" };
+    render();
+  };
+
+  UI.endContinue.onclick = () => {
+    stopAuto();
+
+    if (!rewardsApplied){
+      rewardsApplied = true;
+      const r = normalizeRewards(engine?.state?.reward);
+      if (r && (r.gold || r.accountXP || r.heroXP || (r.gearDrops||[]).length)){
+        applyRewards(r, { teamMode: battleCtx?.mode || TEAM_MODES.GLOBAL });
+        window.EE_TICK?.();
+      }
+    }
+
+    UI.host.classList.remove("on");
+
+    dispatchResolved(battleId, {
+      winner: engine?.state?.winner,
+      won: engine?.state?.winner === "heroes",
+      reward: engine?.state?.reward || null,
+    });
+  };
+
+  // reset UI flow
+  uiMode = "cmd";
+  pendingAction = null;
+  selectedTarget = { side:"enemy", idx:firstLivingEnemyIndex(), mode:"single" };
+  autoOn = false;
+  UI.auto.textContent = "AUTO: OFF";
+
+  render();
+  stepIfNeeded();
+}
+
+function normalizeRewards(reward){
+  if (!reward) return null;
+  if (typeof reward.heroXP === "number" || typeof reward.accountXP === "number" || Array.isArray(reward.gearDrops)){
+    return {
+      gold: Number(reward.gold||0) || 0,
+      accountXP: Number(reward.accountXP||0) || 0,
+      heroXP: Number(reward.heroXP||0) || 0,
+      gearDrops: Array.isArray(reward.gearDrops) ? reward.gearDrops : [],
+    };
+  }
+
+  const xp = Number(reward.xp || 0) || 0;
+  return {
+    gold: Number(reward.gold||0) || 0,
+    accountXP: xp,
+    heroXP: xp,
+    gearDrops: [],
+  };
+}
+
+function render(){
+  if (!UI || !engine) return;
+
+  const st = engine.state;
+
+  const a = st.active || { side:"hero", idx:0 };
+  const turnLabel = a.side === "hero" ? "Your turn" : "Enemy turn";
+  UI.sub.textContent = `${turnLabel} • ${st.turnLabel}`;
+
+  UI.heroes.innerHTML = st.heroes.map((h, i) => renderUnit("hero", i, h, a)).join("");
+  UI.enemies.innerHTML = st.enemies.map((e, i) => renderUnit("enemy", i, e, a)).join("");
+
+  UI.log.innerHTML = st.log.slice(-10).map(line => `<div class="eeLogLine">${escapeHtml(line)}</div>`).join("");
+
+  if (st.winner){
+    UI.end.style.display = "flex";
+    UI.endTitle.textContent = st.winner === "heroes" ? "Victory" : "Defeat";
+    const r = st.reward;
+    UI.endDesc.textContent = r ? `Rewards: +${r.xp} XP, +${r.gold} Gold` : "";
+  } else {
+    UI.end.style.display = "none";
+  }
+
+  UI.active.innerHTML = renderActivePanel();
+  UI.window.innerHTML = renderWindow();
+
+  if (uiMode === "target"){
+    selectedTarget = normalizeSelectedTarget(selectedTarget);
+  }
+}
+
+function renderUnit(side, idx, u, active){
+  const isDead = u.hp <= 0;
+  const isActive = active?.side === side && active?.idx === idx;
+
+  // AOE highlight: if mode is all_enemies/all_allies, highlight all living units on that side
+  let isTarget = false;
+  if (uiMode === "target"){
+    if (selectedTarget?.mode === "all_enemies" && side === "enemy" && !isDead) isTarget = true;
+    else if (selectedTarget?.mode === "all_allies" && side === "hero" && !isDead) isTarget = true;
+    else isTarget = (selectedTarget.side === side && selectedTarget.idx === idx);
+  }
+
+  const pct = u.maxHp > 0 ? Math.max(0, Math.min(1, u.hp / u.maxHp)) : 0;
+  const hpTxt = `${Math.max(0, Math.floor(u.hp))}/${u.maxHp}`;
+  const sh = Math.max(0, Math.floor(u.shield || 0));
+  const shPct = u.maxHp > 0 ? Math.max(0, Math.min(1, sh / u.maxHp)) : 0;
+
+  const portrait = side === "hero" ? resolveHeroPortrait(u.id) : resolveEnemyPortrait(u);
+
+  const attr = side === "hero" ? `data-hidx="${idx}"` : `data-eidx="${idx}"`;
+  const cls = ["eeUnit", side === "hero" ? "hero" : "enemy", isDead ? "dead" : "", isActive ? "active" : "", isTarget ? "target" : ""]
+    .filter(Boolean).join(" ");
+
+  return `
+    <div class="${cls}" ${attr}>
+      <div class="eePortrait">
+        <img src="${portrait}" alt="${escapeAttr(u.name)}" loading="lazy" />
+      </div>
+      <div class="eeMeta">
+        <div class="eeName">${escapeHtml(u.name)}</div>
+        <div class="eeBars">
+          <div class="eeHPWrap">
+            <div class="eeHP">
+              <div class="eeHPFill" style="width:${Math.round(pct*100)}%"></div>
+            </div>
+            ${sh > 0 ? `<div class="eeSH"><div class="eeSHFill" style="width:${Math.round(shPct*100)}%"></div></div>` : ``}
+          </div>
+          <div class="eeTiny">${hpTxt}${sh > 0 ? ` • SH ${sh}` : ``}</div>
+        </div>
+        <div class="eeTinyRow">
+          <span class="eeTiny">SPD ${u.spd}</span>
+          <span class="eeTiny">EN ${u.energy}</span>
+          ${u.statuses?.length ? `<span class="eeTags">${u.statuses.map(s=>`<span class="eeTag">${escapeHtml(s.name)}${s.turns?` ${s.turns}`:""}</span>`).join("")}</span>` : ``}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderActivePanel(){
+  const st = engine.state;
+  if (!st.active) return "";
+  const a = st.active;
+  const u = a.side === "hero" ? st.heroes[a.idx] : st.enemies[a.idx];
+  if (!u) return "";
+
+  return `
+    <div class="eeActiveHdr">Active</div>
+    <div class="eeActiveName">${escapeHtml(u.name)}</div>
+    <div class="eeTiny">${a.side === "hero" ? "Hero" : "Enemy"} • SPD ${u.spd} • EN ${u.energy}</div>
+  `;
+}
+
+function renderWindow(){
+  const st = engine.state;
+  const a = st.active;
+
+  if (st.winner){
+    return `<div class="eeWinMuted">Battle finished.</div>`;
+  }
+
+  if (a?.side === "enemy"){
+    return `<div class="eeWinMuted">Enemy is thinking…</div>`;
+  }
+
+  if (uiMode === "cmd"){
+    return `
+      <div class="eeWinTitle">Command</div>
+      <button class="eeBBtn" data-cmd="attack">Attack</button>
+      <button class="eeBBtn" data-cmd="skills">Skills</button>
+      <button class="eeBBtn" data-cmd="items" disabled title="Inventory not wired yet">Items</button>
+      <button class="eeBBtn" data-cmd="guard">Guard</button>
+      <button class="eeBBtn" data-cmd="flee">Flee</button>
+    `;
+  }
+
+  if (uiMode === "skills"){
+    const list = engine.getHeroSkillMenu(a.idx);
+
+    return `
+      <div class="eeWinTitle">Skills</div>
+      ${list.map(s => {
+        const dis = !s.usable;
+        const def = getSkillDef(s.skillId);
+        const descRaw = def?.text || def?.desc || "";
+        const desc = escapeHtml(descRaw);
+        const lbl = `${escapeHtml(s.name)}${s.cdLeft>0 ? ` (CD ${s.cdLeft})` : ``}${s.energyNeed>0 ? ` (EN ${s.energyNeed})` : ``}`;
+
+        return `
+          <div class="eeSkillRow">
+            <button
+              class="eeBBtn"
+              data-skill="${escapeAttr(s.skillId)}"
+              ${dis ? "disabled" : ""}
+              title="${escapeAttr(descRaw)}"
+            >${lbl}</button>
+            ${descRaw ? `<div class="eeSkillDesc">${desc}</div>` : ``}
+          </div>
+        `;
+      }).join("")}
+      <div class="eeWinRow">
+        <button class="eeBBtn ghost" data-back>Back</button>
+      </div>
+    `;
+  }
+
+  if (uiMode === "target"){
+    const label = pendingAction?.label || "Action";
+
+    let tgt = "—";
+    if (selectedTarget?.mode === "all_enemies") tgt = "All Enemies";
+    else if (selectedTarget?.mode === "all_allies") tgt = "All Allies";
+    else {
+      tgt = selectedTarget.side === "enemy"
+        ? (st.enemies[selectedTarget.idx]?.name || "—")
+        : (st.heroes[selectedTarget.idx]?.name || "—");
+    }
+
+    return `
+      <div class="eeWinTitle">Target</div>
+      <div class="eeWinMuted">${escapeHtml(label)}</div>
+      <div class="eeTargetPick">Selected: <b>${escapeHtml(tgt)}</b></div>
+
+      <div class="eeWinRow">
+        <button class="eeBBtn ghost" data-back>Back</button>
+        <button class="eeBBtn primary" data-exec>Execute</button>
+      </div>
+      <div class="eeWinHint">${
+        isAoeMode(selectedTarget?.mode)
+          ? "This skill hits everyone on that side."
+          : "Tap a hero/enemy portrait to change target."
+      }</div>
+    `;
+  }
+
+  if (uiMode === "flee"){
+    return `
+      <div class="eeWinTitle">Flee?</div>
+      <div class="eeWinMuted">This counts as cancel/abort for now.</div>
+      <div class="eeWinRow">
+        <button class="eeBBtn ghost" data-back>No</button>
+        <button class="eeBBtn" data-flee-yes>Yes, flee</button>
+      </div>
+    `;
+  }
+
+  return ``;
+}
+
+function bindWindowEvents(){
+  if (!UI) return;
+  UI.window.onclick = (ev) => {
+    const btn = ev.target.closest("button");
+    if (!btn || btn.disabled) return;
+
+    if (btn.hasAttribute("data-back")){
+      if (uiMode === "skills") uiMode = "cmd";
+      else if (uiMode === "target") uiMode = (pendingAction?.kind === "skill" ? "skills" : "cmd");
+      else if (uiMode === "flee") uiMode = "cmd";
+      pendingAction = null;
+      selectedTarget = { side:"enemy", idx:firstLivingEnemyIndex(), mode:"single" };
+      render();
+      return;
+    }
+
+    const cmd = btn.getAttribute("data-cmd");
+    if (cmd){
+      if (cmd === "attack"){
+        pendingAction = { kind:"attack", label:"Attack" };
+        uiMode = "target";
+        selectedTarget = { side:"enemy", idx:firstLivingEnemyIndex(), mode:"single" };
+        render();
+        return;
+      }
+      if (cmd === "skills"){
+        uiMode = "skills";
+        pendingAction = null;
+        render();
+        return;
+      }
+      if (cmd === "guard"){
+        doExecute({ kind:"guard", label:"Guard" }, null);
+        return;
+      }
+      if (cmd === "flee"){
+        uiMode = "flee";
+        pendingAction = null;
+        render();
+        return;
+      }
+      if (cmd === "items"){
+        return;
+      }
+    }
+
+    const skillId = btn.getAttribute("data-skill");
+    if (skillId){
+      const def = getSkillDef(skillId);
+      const label = def?.name || "Skill";
+      const tSpec = getSkillTargetSpec(def);
+
+      // Decide side + selection
+      let side = inferTargetSideForSkill(def);
+      let sel = { side, idx: side === "hero" ? firstLivingHeroIndex() : firstLivingEnemyIndex(), mode:"single" };
+
+      if (tSpec === "all_enemies"){
+        sel = { side:"enemy", idx:firstLivingEnemyIndex(), mode:"all_enemies" };
+      }
+      else if (tSpec === "all_allies"){
+        sel = { side:"hero", idx:firstLivingHeroIndex(), mode:"all_allies" };
+      }
+      else if (tSpec === "self"){
+        const a = engine?.state?.active;
+        sel = { side:"hero", idx: a?.idx ?? firstLivingHeroIndex(), mode:"single" };
+      }
+      else if (side === "hero"){
+        // ally-side single target default to heroes
+        sel = { side:"hero", idx:firstLivingHeroIndex(), mode:"single" };
+      }
+
+      pendingAction = { kind:"skill", skillId, label };
+      uiMode = "target";
+      selectedTarget = sel;
+      render();
+      return;
+    }
+
+    if (btn.hasAttribute("data-exec")){
+      doExecute(pendingAction, selectedTarget);
+      return;
+    }
+
+    if (btn.hasAttribute("data-flee-yes")){
+      doFlee();
+      return;
+    }
+  };
+}
+
+function doExecute(action, target){
+  if (!engine || !action) return;
+  const st = engine.state;
+  const a = st.active;
+  if (!a || a.side !== "hero") return;
+
+  if (action.kind === "skill") {
+    const def = getSkillDef(action.skillId);
+    const tSpec = getSkillTargetSpec(def);
+
+    let payload;
+
+    // Trust UI selection first
+    if (target?.mode === "all_enemies") payload = { side: "enemy", mode: "all_enemies" };
+    else if (target?.mode === "all_allies") payload = { side: "hero", mode: "all_allies" };
+    else if (tSpec === "all_enemies") payload = { side: "enemy", mode: "all_enemies" };
+    else if (tSpec === "all_allies") payload = { side: "hero", mode: "all_allies" };
+    else if (tSpec === "self") payload = { side: "hero", idx: a.idx };
+    else {
+      if (target && target.side){
+        payload = { side: target.side, idx: target.idx };
+      } else {
+        const side = inferTargetSideForSkill(def);
+        payload = { side, idx: side === "hero" ? firstLivingHeroIndex() : firstLivingEnemyIndex() };
+      }
+    }
+
+    engine.heroUseSkill(action.skillId, payload);
+  }
+
+  if (action.kind === "attack"){
+    const idx = target?.idx ?? firstLivingEnemyIndex();
+    engine.heroAttack(idx);
+  }
+
+  if (action.kind === "guard"){
+    engine.heroGuard();
+  }
+
+  uiMode = "cmd";
+  pendingAction = null;
+  selectedTarget = { side:"enemy", idx:firstLivingEnemyIndex(), mode:"single" };
+  render();
+
+  stepIfNeeded();
+}
+
+function doFlee(){
+  if (!UI || !engine) return;
+  const bid = engine.state.battleId;
+  stopAuto();
+  UI.host.classList.remove("on");
+  dispatchResolved(bid, { canceled:true, aborted:true });
+}
+
+function stepIfNeeded(){
+  if (!engine || engine.state.winner) return;
+
+  bindWindowEvents();
+
+  if (engine.state.active?.side === "enemy"){
+    setTimeout(() => {
+      engine.stepEnemy();
+      render();
+      stepIfNeeded();
+    }, 380);
+    return;
+  }
+
+  if (engine.state.active?.side === "hero" && autoOn){
+    tickAuto();
+  }
+}
+
+function tickAuto(){
+  stopAuto();
+  if (!engine || engine.state.winner) return;
+
+  autoTimer = setTimeout(() => {
+    if (!engine || engine.state.winner) return;
+
+    const st = engine.state;
+    const a = st.active;
+
+    if (a?.side === "hero"){
+      const skills = engine.getHeroSkillMenu(a.idx);
+      const pick =
+        skills.find(s => s.usable && !s.isUltimate && s.skillId.endsWith("_s1")) ||
+        skills.find(s => s.usable && !s.isUltimate && s.skillId.endsWith("_s2")) ||
+        skills.find(s => s.usable && !s.isUltimate) ||
+        skills.find(s => s.usable) ||
+        null;
+
+      if (pick){
+        const def = getSkillDef(pick.skillId);
+        const tSpec = getSkillTargetSpec(def);
+
+        if (tSpec === "all_enemies") engine.heroUseSkill(pick.skillId, { side:"enemy", mode:"all_enemies" });
+        else if (tSpec === "all_allies") engine.heroUseSkill(pick.skillId, { side:"hero", mode:"all_allies" });
+        else if (tSpec === "self") engine.heroUseSkill(pick.skillId, { side:"hero", idx:a.idx });
+        else {
+          const side = inferTargetSideForSkill(def);
+          engine.heroUseSkill(pick.skillId, { side, idx: side === "hero" ? firstLivingHeroIndex() : firstLivingEnemyIndex() });
+        }
+      } else {
+        engine.heroAttack(firstLivingEnemyIndex());
+      }
+
+      render();
+      stepIfNeeded();
+      return;
+    }
+
+    if (a?.side === "enemy"){
+      engine.stepEnemy();
+      render();
+      stepIfNeeded();
+    }
+
+  }, 420);
+}
+
+function stopAuto(){
+  if (autoTimer){
+    clearTimeout(autoTimer);
+    autoTimer = null;
+  }
+}
+
+function dispatchResolved(battleId, result){
+  window.dispatchEvent(new CustomEvent("EE_BATTLE_RESOLVED", {
+    detail: { battleId, result }
+  }));
+
+  if (result?.won === true || result?.winner === "heroes"){
+    window.dispatchEvent(new CustomEvent("EE_STORY_BATTLE_RESULT", {
+      detail: { battleId, won:true }
+    }));
+  } else if (result?.won === false || result?.winner === "enemies"){
+    window.dispatchEvent(new CustomEvent("EE_STORY_BATTLE_RESULT", {
+      detail: { battleId, won:false }
+    }));
+  } else {
+    window.dispatchEvent(new CustomEvent("EE_STORY_BATTLE_RESULT", {
+      detail: { battleId, canceled:true }
+    }));
+  }
+}
+
+function firstLivingEnemyIndex(){
+  const st = engine?.state;
+  if (!st) return 0;
+  const i = st.enemies.findIndex(e => e.hp > 0);
+  return i >= 0 ? i : 0;
+}
+
+function firstLivingHeroIndex(){
+  const st = engine?.state;
+  if (!st) return 0;
+  const i = st.heroes.findIndex(h => h.hp > 0);
+  return i >= 0 ? i : 0;
+}
+
+function normalizeSelectedTarget(sel){
+  const st = engine?.state;
+  if (!st) return sel;
+
+  if (sel?.mode === "all_enemies"){
+    return { side:"enemy", idx:firstLivingEnemyIndex(), mode:"all_enemies" };
+  }
+  if (sel?.mode === "all_allies"){
+    return { side:"hero", idx:firstLivingHeroIndex(), mode:"all_allies" };
+  }
+
+  const side = sel?.side || "enemy";
+  const idx = Number(sel?.idx ?? 0);
+
+  if (side === "enemy"){
+    if (st.enemies[idx] && st.enemies[idx].hp > 0) return { side:"enemy", idx, mode:"single" };
+    return { side:"enemy", idx:firstLivingEnemyIndex(), mode:"single" };
+  }
+
+  if (side === "hero"){
+    if (st.heroes[idx] && st.heroes[idx].hp > 0) return { side:"hero", idx, mode:"single" };
+    return { side:"hero", idx:firstLivingHeroIndex(), mode:"single" };
+  }
+
+  return { side:"enemy", idx:firstLivingEnemyIndex(), mode:"single" };
+}
+
+function resolveHeroPortrait(heroId){
+  const id = String(heroId || "").trim();
+  return HERO_ART_BASE + HERO_ART_TEMPLATE.replace("{id}", id);
+}
+
+function resolveEnemyPortrait(enemy){
+  if (enemy?.art) return enemy.art;
+  const id = String(enemy?.id || "enemy").trim();
+  return `./assets/enemies/portraits/enemy_${id}.png`;
+}
+
+function escapeHtml(s){
+  return String(s || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function escapeAttr(s){
+  return escapeHtml(s).replaceAll("'", "&#39;");
+}
+
+function injectStyles(){
+  if (document.getElementById("eeBattleFFStyles")) return;
+  const st = document.createElement("style");
+  st.id = "eeBattleFFStyles";
+  st.textContent = `
+    #eeBattleHost{position:fixed; inset:0; z-index:9999; display:none;}
+    #eeBattleHost.on{display:block;}
+
+    .eeB{position:absolute; inset:0; display:flex; flex-direction:column; background: rgba(0,0,0,.72); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);}
+
+    .eeBTop{display:flex; align-items:center; justify-content:space-between; padding:14px 14px; gap:12px;}
+    .eeBTitle{font-weight:900; letter-spacing:.3px; font-size:18px;}
+    .eeBSub{opacity:.85; font-size:12px; margin-top:2px;}
+    .eeBTopRight{display:flex; align-items:center; gap:8px;}
+
+    .eeBMini{border:1px solid rgba(255,255,255,.16); background: rgba(255,255,255,.06); color:#fff; padding:8px 10px; border-radius:12px; font-weight:800; font-size:12px;}
+    .eeBX{border:1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.06); color:#fff; width:38px; height:38px; border-radius:14px; font-size:18px;}
+
+    .eeBStage{position:relative; flex:1; overflow:hidden;}
+    .eeBBackdrop{position:absolute; inset:0; background-size:cover; background-position:center; transform: scale(1.04); filter: saturate(1.05) contrast(1.05) brightness(.85);}
+    .eeBShade{position:absolute; inset:0; background: linear-gradient(180deg, rgba(0,0,0,.55), rgba(0,0,0,.78));}
+
+    .eeBArena{position:absolute; inset:64px 0 170px 0; display:flex; justify-content:space-between; padding:0 14px; gap:12px;}
+
+    .eeBCol{display:flex; flex-direction:column; gap:10px; width:min(46vw, 320px);}
+    .eeBColEnemies{align-items:flex-end;}
+
+    .eeUnit{display:flex; align-items:center; gap:10px; width:100%; max-width:320px; padding:8px 10px; border-radius:16px; border:1px solid rgba(255,255,255,.10); background: rgba(10,12,22,.45); box-shadow: 0 8px 30px rgba(0,0,0,.28);}
+    .eeUnit.enemy{flex-direction:row-reverse; text-align:right;}
+
+    .eeUnit.dead{opacity:.35; filter: grayscale(1);}
+    .eeUnit.active{outline:2px solid rgba(180,220,255,.55); box-shadow: 0 0 0 6px rgba(120,162,255,.12), 0 10px 35px rgba(0,0,0,.35);}
+    .eeUnit.target{outline:2px solid rgba(255,220,120,.7); box-shadow: 0 0 0 6px rgba(255,220,120,.15);}
+
+    .eePortrait{width:54px; height:54px; border-radius:16px; overflow:hidden; border:1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.04);}
+    .eePortrait img{width:100%; height:100%; object-fit:cover; display:block;}
+
+    .eeMeta{flex:1; min-width:0;}
+    .eeName{font-weight:900; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+    .eeBars{margin-top:6px; display:flex; flex-direction:column; align-items:stretch; gap:4px;}
+    .eeHP{position:relative; flex:1; height:8px; border-radius:10px; background: rgba(255,255,255,.08); overflow:hidden;}
+    .eeHPFill{height:100%; background: rgba(120,200,255,.75);}
+
+    .eeHPWrap{display:flex; flex-direction:column; gap:4px;}
+    .eeSH{position:relative; flex:1; height:6px; border-radius:10px; background: rgba(255,255,255,.06); overflow:hidden;}
+    .eeSHFill{height:100%; background: rgba(200,160,255,.65);}
+
+    .eeTinyRow{display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:6px;}
+    .eeTiny{font-size:11px; opacity:.85;}
+
+    .eeTags{display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end;}
+    .eeTag{font-size:10px; padding:3px 7px; border-radius:999px; border:1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.05);}
+
+    .eeBCommand{position:absolute; left:0; right:0; bottom:0; padding:12px 14px; display:flex; gap:12px; align-items:flex-end;}
+
+    .eeBActive{width:170px; min-width:170px; padding:12px 12px; border-radius:18px; border:1px solid rgba(255,255,255,.10); background: rgba(10,12,22,.58); box-shadow: 0 10px 30px rgba(0,0,0,.35);}
+    .eeActiveHdr{font-size:11px; opacity:.75; font-weight:800;}
+    .eeActiveName{font-size:14px; font-weight:900; margin-top:6px;}
+
+    .eeBWindow{flex:1; max-width:320px; padding:12px 12px; border-radius:18px; border:1px solid rgba(255,255,255,.10); background: rgba(10,12,22,.65); box-shadow: 0 10px 30px rgba(0,0,0,.35); display:flex; flex-direction:column; gap:8px;}
+
+    .eeWinTitle{font-weight:900; font-size:12px; opacity:.9; margin-bottom:2px;}
+    .eeWinMuted{font-size:12px; opacity:.85;}
+    .eeWinHint{font-size:11px; opacity:.75; margin-top:6px;}
+    .eeTargetPick{font-size:12px; opacity:.92; margin: 4px 0 6px 0;}
+
+    .eeWinRow{display:flex; gap:8px; margin-top:6px;}
+
+    .eeBBtn{border:1px solid rgba(255,255,255,.16); background: rgba(255,255,255,.06); color:#fff; padding:10px 12px; border-radius:14px; font-weight:900; font-size:13px; text-align:left;}
+    .eeBBtn.primary{border-color: rgba(140,200,255,.35); background: rgba(90,140,255,.18);}
+    .eeBBtn.ghost{background: transparent;}
+    .eeBBtn:disabled{opacity:.45;}
+
+    /* Skill description rows */
+    .eeSkillRow{display:flex; flex-direction:column; gap:6px; margin-bottom:6px;}
+    .eeSkillDesc{font-size:11px; opacity:.82; line-height:1.25; padding-left:6px;}
+
+    .eeBLog{position:absolute; right:14px; top:64px; width:min(360px, 92vw); max-height:45vh; overflow:auto; padding:12px 12px; border-radius:18px; border:1px solid rgba(255,255,255,.10); background: rgba(10,12,22,.72); box-shadow: 0 10px 35px rgba(0,0,0,.35);}
+    .eeLogLine{font-size:12px; opacity:.9; padding:6px 0; border-bottom:1px dashed rgba(255,255,255,.08);}
+    .eeLogLine:last-child{border-bottom:none;}
+
+    .eeBEnd{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; background: rgba(0,0,0,.72);}
+    .eeBEndTitle{font-size:22px; font-weight:1000;}
+    .eeBEndDesc{font-size:13px; opacity:.85;}
+
+    @media (max-width: 520px){
+      .eeBActive{display:none;}
+      .eeBCommand{align-items:stretch;}
+      .eeBWindow{max-width:none;}
+      .eeBArena{inset:64px 0 190px 0;}
+    }
+  `;
+  document.head.appendChild(st);
+
+  setTimeout(bindWindowEvents, 0);
+}
