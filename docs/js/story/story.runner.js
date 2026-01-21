@@ -294,6 +294,7 @@ const run = {
   segmentId: null,
   beatIndex: 0,
   waitingBattleId: null,
+  justCompleted: false,
 };
 
 function ensureStyle() {
@@ -775,6 +776,15 @@ function markChapterComplete(chId) {
 function exitStory() {
   run.waitingBattleId = null;
   showOverlay(false);
+
+  // If we just completed a chapter, bounce the user to Chapter Select next time.
+  if (run.justCompleted) {
+    run.justCompleted = false;
+    // Give the UI a beat to settle before opening picker
+    setTimeout(() => {
+      try { openChapterSelect(); } catch(e) {}
+    }, 0);
+  }
 }
 
 function nextBeat() {
@@ -805,6 +815,8 @@ function showChapterComplete() {
   const chId = run.chapterId;
   const meta = CHAPTER_META[chId];
   markChapterComplete(chId);
+
+  run.justCompleted = true;
 
   ui.title.textContent = `${meta?.label || chId.toUpperCase()} COMPLETE`;
   ui.bg.style.backgroundImage = bgCss(getSegment()?.bg);

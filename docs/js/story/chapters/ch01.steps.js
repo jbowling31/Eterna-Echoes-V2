@@ -616,187 +616,187 @@ export const CH01 = {
         {
           "t": "line",
           "speaker": "NARRATION",
-          "text": "Cracked stone. A scorched mural. Familiar footsteps echo in halls long ruined."
+          "text":"Cracked stone. A scorched mural. Familiar footsteps echo in halls long ruined."
         },
         {
           "t": "line",
           "speaker": "NARRATION",
-          "text": "The party approaches the Old Keep, a crumbling fortress now buried beneath overgrowth and fog. The battle has paused — no enemies in sight. Just silence, and the occasional flicker of phantom torchlight."
+          "text":"The party approaches the Old Keep, a crumbling fortress now buried beneath overgrowth and fog. The battle has paused — no enemies in sight. Just silence, and the occasional flicker of phantom torchlight."
         },
         {
           "t": "line",
           "speaker": "PLAYER",
-          "text": "This place feels… quieter. Heavier. Like the stone remembers what the people don’t.",
+          "text":"This place feels… quieter. Heavier. Like the stone remembers what the people don’t.",
           "tone": "inner"
         },
         {
           "t": "line",
           "speaker": "PLAYER",
-          "text": "I didn’t plan to bring them here. But it’s where the glyph led.",
+          "text":"I didn’t plan to bring them here. But it’s where the glyph led.",
           "tone": "inner"
         },
         {
           "t": "line",
           "speaker": "NARRATION",
-          "text": "(The group steps into the Keep’s shattered outer hall. Vireon slows his pace as they approach a scorched mural on the far wall.)"
+          "text":"The group steps into the Keep’s shattered outer hall. Vireon slows his pace as they approach a scorched mural on the far wall."
         },
         {
           "t": "line",
           "speaker": "Vireon",
-          "text": "“…This wasn’t supposed to be here.”",
+          "text":"“…This wasn’t supposed to be here.”",
           "portrait": "hero:vireon"
         },
         {
           "t": "line",
           "speaker": "NARRATION",
-          "text": "(He walks up to the mural — a phoenix-shaped shield, cracked down the center. A knight in obsidian armor stands at its center, flanked by fading figures.)"
+          "text":"He walks up to the mural — a phoenix-shaped shield, cracked down the center. A knight in obsidian armor stands at its center, flanked by fading figures."
         },
         {
           "t": "line",
           "speaker": "Vireon",
-          "text": "“I fought in this Keep. But this painting… it shouldn’t exist. It was destroyed in the fire.”",
+          "text":"“I fought in this Keep. But this painting… it shouldn’t exist. It was destroyed in the fire.”",
           "portrait": "hero:vireon"
         },
         {
           "t": "line",
           "speaker": "Caelum",
-          "text": "“Well, maybe it looped back in. Time loves a good sequel.”",
+          "text":"“Well, maybe it looped back in. Time loves a good sequel.”",
           "portrait": "hero:caelum"
         },
         {
           "t": "line",
           "speaker": "NARRATION",
-          "text": "(He squints at the mural.)"
+          "text":"He squints at the mural."
         },
         {
           "t": "line",
           "speaker": "Caelum",
-          "text": "“Wait… is that you?”",
+          "text":"“Wait… is that you?”",
           "portrait": "hero:caelum"
         },
         {
           "t": "line",
           "speaker": "Vireon",
-          "text": "“I—yes. But... older. Worn.”",
+          "text":"“I—yes. But... older. Worn.”",
           "portrait": "hero:vireon"
         },
         {
           "t": "line",
           "speaker": "NARRATION",
-          "text": "(He stares into the cracks of the painted face.)"
+          "text":"He stares into the cracks of the painted face."
         },
         {
           "t": "line",
           "speaker": "Vireon",
-          "text": "“This is the battle I died in.”",
+          "text":"“This is the battle I died in.”",
           "portrait": "hero:vireon"
         },
         {
           "t": "line",
           "speaker": "Sirenia",
-          "text": "“Yet here you stand. Whole. Speaking to your reflection.”",
+          "text":"“Yet here you stand. Whole. Speaking to your reflection.”",
           "portrait": "hero:sirenia"
         },
         {
           "t": "line",
           "speaker": "NARRATION",
-          "text": "(Her voice softens.)"
+          "text":"Her voice softens."
         },
         {
           "t": "line",
           "speaker": "Sirenia",
-          "text": "“Time is folding in on itself again. The echoes grow louder.”",
+          "text":"“Time is folding in on itself again. The echoes grow louder.”",
           "portrait": "hero:sirenia"
         },
         {
           "t": "line",
           "speaker": "Caelum",
-          "text": "“Okay, so we’ve got spooky ruins, undead paintings, and a time loop we’re half pretending doesn’t exist. Anyone else thinking we might be the problem?”",
+          "text":"“Okay, so we’ve got spooky ruins, undead paintings, and a time loop we’re half pretending doesn’t exist. Anyone else thinking we might be the problem?”",
           "portrait": "hero:caelum"
         },
         {
           "t": "line",
           "speaker": "PLAYER",
-          "text": "“I didn’t choose to come here. The glyph... it brought us.”"
+          "text":"“I didn’t choose to come here. The glyph... it brought us.”"
         },
         {
           "t": "line",
           "speaker": "NARRATION",
-          "text": "(You glance around — the stone hums faintly, like it’s waiting for something.)"
+          "text":"You glance around — the stone hums faintly, like it’s waiting for something."
         },
         {
           "t": "line",
           "speaker": "PLAYER",
-          "text": "“It’s like the world wants us to remember.”"
+          "text":"“It’s like the world wants us to remember.”"
         },
         {
           "t": "line",
           "speaker": "Sirenia",
-          "text": "“Or wants to remind us that we’ve failed before.”",
+          "text":"“Or wants to remind us that we’ve failed before.”",
           "portrait": "hero:sirenia"
         },
         {
           "t": "line",
           "speaker": "NARRATION",
-          "text": "(Vireon places his hand on the mural. His gauntlet glows faintly — then the light fades.)"
+          "text":"Vireon places his hand on the mural. His gauntlet glows faintly — then the light fades."
         },
         {
           "t": "line",
           "speaker": "Vireon",
-          "text": "“Either way, we face the same war. Until we end it, or it ends us.”",
+          "text":"“Either way, we face the same war. Until we end it, or it ends us.”",
           "portrait": "hero:vireon"
         },
         {
           "t": "line",
           "speaker": "NARRATION",
-          "text": "(A faint sound — like distant footsteps — echoes through the empty halls.)"
+          "text":"A faint sound — like distant footsteps — echoes through the empty halls."
         },
         {
           "t": "line",
           "speaker": "PLAYER",
-          "text": "I don’t know why this place feels like it’s watching us.",
+          "text":"I don’t know why this place feels like it’s watching us.",
           "tone": "inner"
         },
         {
           "t": "line",
           "speaker": "PLAYER",
-          "text": "But I know one thing — that mural was painted for someone to see.",
+          "text":"But I know one thing — that mural was painted for someone to see.",
           "tone": "inner"
         },
         {
           "t": "line",
           "speaker": "PLAYER",
-          "text": "And now, we’ve seen it.",
+          "text":"And now, we’ve seen it.",
           "tone": "inner"
         },
         {
           "t": "line",
           "speaker": "PLAYER",
-          "text": "⚔️ NO BATTLE – STORY ONLY SCENE",
+          "text":"⚔️ NO BATTLE – STORY ONLY SCENE",
           "tone": "inner"
         },
         {
           "t": "line",
           "speaker": "PLAYER",
-          "text": "This is a worldbuilding & foreshadowing section, meant to:",
+          "text":"This is a worldbuilding & foreshadowing section, meant to:",
           "tone": "inner"
         },
         {
           "t": "line",
           "speaker": "PLAYER",
-          "text": "Deepen Vireon’s personal mystery",
+          "text":"Deepen Vireon’s personal mystery",
           "tone": "inner"
         },
         {
           "t": "line",
           "speaker": "PLAYER",
-          "text": "Tease that events are repeating differently",
+          "text":"Tease that events are repeating differently",
           "tone": "inner"
         },
         {
           "t": "line",
           "speaker": "PLAYER",
-          "text": "Create tension through an otherwise “peaceful” scene",
+          "text":"Create tension through an otherwise “peaceful” scene",
           "tone": "inner"
         }
       ],

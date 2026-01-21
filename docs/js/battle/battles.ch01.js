@@ -143,18 +143,7 @@ export const CH01_BATTLES = {
     backdrop: "./assets/bg/bg_fungal_forest_core.png",
     reward: { xp: 30, gold: 65 },
     waves: [
-      [
-        {
-          id: "spore_beast",
-          name: "Spore Beast",
-          element: "Poison",
-          maxHp: 220, atk: 18, def: 10, spd: 88,
-          ai: "basic",
-          skillIds: ["e_spore_bloom", "e_spore_shield"],
-          art: "./assets/enemies/portraits/enemy_spore_beast.png",
-        },
-      ],
-      [
+[
         {
           id: "shroud_hatchling",
           name: "Shroud Hatchling A",
@@ -174,6 +163,17 @@ export const CH01_BATTLES = {
           art: "./assets/enemies/portraits/enemy_shroud_hatchling.png",
         },
       ],
+[
+        {
+          id: "spore_beast",
+          name: "Spore Beast",
+          element: "Poison",
+          maxHp: 220, atk: 18, def: 10, spd: 88,
+          ai: "basic",
+          skillIds: ["e_spore_bloom", "e_spore_shield"],
+          art: "./assets/enemies/portraits/enemy_spore_beast.png",
+        },
+      ]
     ],
   },
 
@@ -322,6 +322,10 @@ export const CH01_BATTLES = {
         },
       ],
     ],
+    waveInterludes: {
+      1: { title: "The loop snaps", text: "You strike the Warden down… and reality lurches. The glyph-ring flares, threads reweave, and the Shroud Warden rises again — stronger this time." },
+    }
+,
   },
 
   ch01_b09_memory_fragments: {
@@ -409,6 +413,11 @@ export const CH01_BATTLES = {
         },
       ],
     ],
+    waveInterludes: {
+      1: { title: "It remembers", text: "The Herald staggers — then steadies. The air bends like a page being rewritten. A second form bleeds through." },
+      2: { title: "Final rewrite", text: "Your last hit lands… and the loop refuses to end. The Herald reforms with a hateful clarity, pulling the room into a deeper pattern." },
+    }
+,
   },
 };
 

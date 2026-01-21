@@ -115,6 +115,7 @@ function hydrate(){
   seedStarters();
   seedStarterGear();
   const s = loadState();
+window.state = s;
   if (!s) return;
 const se = s.energyState || {};
 energyState.cur = se.cur ?? se.current ?? energyState.cur;

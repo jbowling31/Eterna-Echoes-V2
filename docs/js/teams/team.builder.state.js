@@ -1,6 +1,7 @@
 import { isUnlocked } from "../heroes/hero.progress.state.js";
 
-export const TEAM_SIZE = 5;
+// UI constraint: we cap party size to 4 so portraits fit cleanly in battle.
+export const TEAM_SIZE = 4;
 
 // Modes that will eventually have their own team.
 // Keep strings stable; they become save keys.

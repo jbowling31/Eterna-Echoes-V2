@@ -975,3 +975,69 @@ body:before{
 /* Variants (same markup, different sizing) */
 .heroTile--team{ border-radius: var(--tileRTeam, 14px); }
 .heroTile--picker{ border-radius: var(--tileRPicker, 14px); }
+
+/* -------------------------
+   Skill list rows (Hero Detail / Skill Equip)
+------------------------- */
+.skillList{
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+}
+
+.skillRow{
+  appearance:none;
+  -webkit-appearance:none;
+  width:100%;
+  text-align:left;
+
+  border-radius:16px;
+  border:1px solid rgba(255,255,255,0.14);
+  background: rgba(7,10,20,0.70);
+  box-shadow: 0 10px 24px rgba(0,0,0,0.28);
+  padding:12px;
+
+  color: rgba(241,244,255,0.98);
+  cursor:pointer;
+
+  display:flex;
+  align-items:flex-start;
+  gap:10px;
+
+  transition: transform .12s ease, border-color .12s ease, box-shadow .12s ease;
+}
+
+.skillRow:active{ transform: scale(.99); }
+
+.skillRow:hover{
+  border-color: rgba(122,162,255,0.28);
+  box-shadow: 0 14px 30px rgba(0,0,0,0.34);
+}
+
+.skillRow:disabled{
+  opacity:0.55;
+  cursor:not-allowed;
+}
+
+.skillRow .left{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  min-width:0;
+}
+
+.skillRow .name{
+  font-weight:800;
+  font-size:14px;
+  line-height:1.1;
+}
+
+.skillRow .muted{
+  font-size:12px;
+  color: rgba(233,238,255,0.74);
+}
+
+.skillRow.isEquipped{
+  border-color: rgba(246,210,106,0.35);
+  box-shadow: 0 14px 30px rgba(0,0,0,0.34);
+}

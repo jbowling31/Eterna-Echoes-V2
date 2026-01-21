@@ -85,6 +85,7 @@ export function renderHeroes(){
         <div class="heroTile__meta">
           <div class="heroTile__name">${h.name || "Unknown"}</div>
           <div class="heroTile__sub">${h.rarity} • ${h.element} • ${h.role}</div>
+          ${unlocked ? renderXPTile(h.id) : ``}
         </div>
 
         ${unlocked ? `` : `

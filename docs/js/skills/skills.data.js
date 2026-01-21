@@ -28,6 +28,7 @@ export const SKILLS = Object.freeze({
     id:"arlen_s2", heroId:"arlen", slot:"Skill 2", name:"Fire Glyph",
     kind:"buff", scaleStat:null, basePct:0, perLevelPct:0,
     cdTurns:2, energyCost:0,
+    target:"all_allies",
     text:"Buffs allies: Magic Attack and Accuracy for 2 turns.",
     status:{ name:"Fire Glyph", chance:100, turns:2, target:"all_allies" },
   },
@@ -62,6 +63,7 @@ export const SKILLS = Object.freeze({
     id:"nyxa_u", heroId:"nyxa", slot:"Ultimate", name:"Paradox Trap",
     kind:"debuff", scaleStat:null, basePct:0, perLevelPct:0,
     cdTurns:4, energyCost:100,
+    target:"all_enemies",
     text:"Removes all buffs and locks ultimate abilities for 2 turns.",
     status:{ name:"Ult Lock", chance:100, turns:2, target:"all_enemies" },
   },
@@ -109,6 +111,7 @@ dorun_s1:{
     id:"elya_s1", heroId:"elya", slot:"Skill 1", name:"Fracture Waltz",
     kind:"debuff", scaleStat:null, basePct:0, perLevelPct:0,
     cdTurns:2, energyCost:0,
+    target:"all_enemies",
     text:"Area slow and skill delay.",
     status:{ name:"Slow", chance:100, turns:1, target:"all_enemies" },
   },
@@ -123,6 +126,7 @@ dorun_s1:{
     id:"elya_u", heroId:"elya", slot:"Ultimate", name:"Glacial Timefall",
     kind:"control", scaleStat:null, basePct:0, perLevelPct:0,
     cdTurns:4, energyCost:100,
+    target:"all_enemies",
     text:"Freezes all enemies (skip 1 turn).",
     status:{ name:"Freeze", chance:100, turns:1, target:"all_enemies" },
   },
@@ -151,6 +155,7 @@ dorun_s1:{
     id:"solen_u", heroId:"solen", slot:"Ultimate", name:"Cataclysm Spear",
     kind:"damage", scaleStat:"ATK", basePct:140, perLevelPct:9,
     cdTurns:4, energyCost:100,
+    target:"all_enemies",
     text:"Heavy AoE fire attack. Chance to Burn each target.",
     status:{ name:"Burn", chance:30, turns:2, target:"all_enemies" },
   },
@@ -177,6 +182,7 @@ vireon_s1:{
     id:"vireon_s2", heroId:"vireon", slot:"Skill 2", name:"Flame Pulse",
     kind:"damage", scaleStat:"ATK", basePct:85, perLevelPct:7,
     cdTurns:2, energyCost:0,
+    target:"all_enemies",
     text:"Small AoE damage and reduces enemy Attack for 1 turn.",
     status:{ name:"ATK Down", chance:100, turns:1, target:"all_enemies" },
   },
@@ -210,20 +216,32 @@ vireon_u:{
     id:"sirenia_s1", heroId:"sirenia", slot:"Skill 1", name:"Echo Restoration",
     kind:"heal", scaleStat:"ATK", basePct:100, perLevelPct:7,
     cdTurns:2, energyCost:0,
+    target:"all_allies",
     text:"Heals all allies and removes 1 debuff.",
   },
-  sirenia_s2:{
-    id:"sirenia_s2", heroId:"sirenia", slot:"Skill 2", name:"Tidal Blessing",
-    kind:"buff", scaleStat:null, basePct:0, perLevelPct:0,
-    cdTurns:2, energyCost:0,
-    text:"Buffs DEF and RESIST for 2 turns.",
-  },
-  sirenia_u:{
-    id:"sirenia_u", heroId:"sirenia", slot:"Ultimate", name:"Moonwake Revival",
-    kind:"support", scaleStat:null, basePct:0, perLevelPct:0,
-    cdTurns:4, energyCost:100,
-    text:"Revives one ally at 50% HP and grants them an extra turn.",
-  },
+sirenia_s2:{
+  id:"sirenia_s2", heroId:"sirenia", slot:"Skill 2", name:"Tidal Blessing",
+  kind:"buff", cdTurns:2, energyCost:0, target:"all_allies",
+  text:"Buffs DEF and RESIST for 2 turns.",
+  statuses:[
+    { name:"DEF Up",    chance:100, turns:2, target:"all_allies", meta:{ pct:20 } },
+    { name:"Resist Up", chance:100, turns:2, target:"all_allies", meta:{ pct:30 } },
+  ],
+},
+
+
+
+
+sirenia_u:{
+  id:"sirenia_u", heroId:"sirenia", slot:"Ultimate", name:"Moonwake Revival",
+  kind:"support", basePct:0, perLevelPct:0,
+  cdTurns:4, energyCost:100,
+  mode:"single_ally",
+  canTargetDead:true,
+  revivePct:50,
+  grantExtraTurn:true,
+  text:"Revive one fallen ally with 50% HP."
+},
 
   // ===== Caelum (SR) =====
   caelum_basic:{
@@ -235,16 +253,24 @@ vireon_u:{
     id:"caelum_s1", heroId:"caelum", slot:"Skill 1", name:"Spiral Dash",
     kind:"damage", scaleStat:"ATK", basePct:95, perLevelPct:7,
     cdTurns:2, energyCost:0,
-    text:"Deals damage and gains Evasion for 1 turn.",
+        self: { shieldPctAtk: 60, turns: 2 },
+    text: "Dash through an enemy for heavy Wind damage, then gain a shield (60% ATK) for 2 turns.",
     status:{ name:"Evasion", chance:100, turns:1, target:"self" },
   },
-  caelum_s2:{
-    id:"caelum_s2", heroId:"caelum", slot:"Skill 2", name:"Wind Shear",
-    kind:"damage", scaleStat:"ATK", basePct:80, perLevelPct:6,
-    cdTurns:2, energyCost:0,
-    text:"AoE attack that lowers enemy Speed.",
-    status:{ name:"Slow", chance:70, turns:2, target:"all_enemies" },
-  },
+caelum_s2:{
+  id:"caelum_s2", heroId:"caelum", slot:"Skill 2", name:"Wind Shear",
+  kind:"damage", scaleStat:"ATK", basePct:80, perLevelPct:6,
+  cdTurns:2, energyCost:0,
+
+  // ✅ This makes the skill itself AOE in your UI + engine payload routing
+  target:"all_enemies",
+
+  text:"AoE attack that lowers enemy Speed.",
+
+  // ✅ Keep the status as all_enemies too (redundant but fine)
+  status:{ name:"Slow", chance:70, turns:2, target:"all_enemies" },
+},
+
   caelum_u:{
     id:"caelum_u", heroId:"caelum", slot:"Ultimate", name:"Tempest Waltz",
     kind:"damage", scaleStat:"ATK", basePct:130, perLevelPct:8,
@@ -350,8 +376,9 @@ export const ENEMY_SKILLS = Object.freeze({
     perLevelPct:0,
     cdTurns:3,
     energyCost:0,
+    targetMode:"all_enemies",
     text:"Rallies allies, raising their Defense briefly.",
-    status:{ name:"DEF Up", chance:100, turns:1, target:"all_allies" },
+    status:{ name:"DEF Up", chance:100, turns:1, target:"all_enemies" },
   },
 
   e_scout_pounce: {

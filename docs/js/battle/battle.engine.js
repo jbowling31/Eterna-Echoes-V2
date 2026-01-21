@@ -12,6 +12,7 @@
 import { HEROES } from "../heroes/heroes.data.js";
 import { getHeroLevel } from "../heroes/hero.progress.state.js";
 import { getSkillDef, getEnemySkillDef } from "../skills/skills.data.js";
+import { getHeroDerivedStats } from "../heroes/hero.stats.logic.js";
 
 // Tunables
 const ENERGY_MAX = 100;
@@ -26,10 +27,12 @@ const STATUS = {
   STEALTH: "Stealth",
   FREEZE: "Freeze",
   STUN: "Stun",
+  STUN: "Stun",
   LOOP_LOCK: "Loop Lock",
   INVULN: "Invulnerable",
   REFLECT: "Reflect",
   ULT_LOCK: "Ult Lock",
+  RES_UP: "Resist Up",
 };
 
 function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
@@ -41,42 +44,71 @@ function chance(pct){
   return Math.random() * 100 < normalized;
 }
 
-function statScale(level){
-  // prototype scaling. You can replace with your real stat system later.
-  const L = Math.max(1, Math.floor(level || 1));
-  return {
-    maxHp: 95 + L * 14,
-    atk:  14 + L * 3.3,
-    def:   7 + L * 2.0,
-    spd:  95 + L * 1.2,
-  };
+function sumStatusPct(u, statusName, fallbackPct = 0){
+  const list = (u?.statuses || []).filter(s => s && s.turns > 0 && s.name === statusName);
+  if (!list.length) return 0;
+  let sum = 0;
+  for (const s of list){
+    const p = Number(s?.meta?.pct);
+    sum += Number.isFinite(p) ? p : fallbackPct;
+  }
+  return sum;
+}
+
+
+function getResistChance(u){
+  const s = (u?.statuses || []).find(x => x?.name === STATUS.RES_UP && x.turns > 0);
+  const pct = Number(s?.meta?.pct ?? 0);
+  return Math.max(0, Math.min(100, pct));
+}
+
+// Decide if an incoming status is "negative"
+function isNegativeStatusName(name){
+  const n = String(name || "").toLowerCase();
+  // Expand this list as you add more debuffs
+  return (
+    n.includes("down") ||          // ATK Down, DEF Down, etc
+    n.includes("burn") ||
+    n.includes("poison") ||
+    n.includes("bleed") ||
+    n.includes("stun") ||
+    n.includes("freeze") ||
+    n.includes("silence") ||
+    n.includes("taunt") ||         // if you consider taunt negative (often is)
+    n.includes("weaken") ||
+    n.includes("vuln") ||
+    n.includes("slow")
+  );
 }
 
 function makeHeroUnit(heroId){
   const h = (HEROES || []).find(x => x.id === heroId) || { id: heroId, name: heroId, skills: [] };
-  const lvl = getHeroLevel(heroId);
-  const base = statScale(lvl);
+
+  // Single source of truth: role+level derived stats (and gear bonuses if present).
+  // This keeps Hero Info UI stats consistent with battle math.
+  const stats = getHeroDerivedStats(heroId, { includeGear: true });
 
   return {
     side: "hero",
     id: h.id,
     name: h.name,
-    level: lvl,
+    level: stats.level,
     element: h.element || "",
     role: h.role || "",
 
-    maxHp: Math.floor(base.maxHp),
-    hp: Math.floor(base.maxHp),
-    atk: Math.floor(base.atk),
-    def: Math.floor(base.def),
-    spd: Math.floor(base.spd),
+    maxHp: Math.floor(stats.hp),
+    hp: Math.floor(stats.hp),
+    atk: Math.floor(stats.atk),
+    def: Math.floor(stats.def),
+    spd: Math.floor(stats.spd),
+    shield: 0,
 
     energy: 0,
 
     // cooldowns: { skillId: turnsRemaining }
     cds: {},
 
-    // statuses: [{name, turns, meta?}]
+    // statuses: [{ name, turns, meta }]
     statuses: [],
 
     // initiative
@@ -86,6 +118,7 @@ function makeHeroUnit(heroId){
     skillIds: buildHeroSkillIds(h.id, h.skills),
   };
 }
+
 
 function buildHeroSkillIds(heroId, listed){
   const out = [];
@@ -113,7 +146,7 @@ function makeEnemyUnit(enemyDef, idx, scaleMult=1){
     atk: Math.floor((e.atk ?? 12) * scaleMult),
     def: Math.floor((e.def ?? 6) * scaleMult),
     spd,
-
+    shield: 0,
     energy: 0,
     cds: {},
     statuses: [],
@@ -230,20 +263,23 @@ function applyDamage(state, target, amount, meta={}) {
 }
 
 function computeDamage(attacker, target, pct){
-  let aAtk = Math.max(1, attacker?.atk || 1);
-  let tDef = Math.max(0, target?.def || 0);
+let aAtk = Math.floor(attacker?.atk || 0);
+let tDef = Math.floor(target?.def || 0);
 
-  // ATK Down reduces attacker output
-  if (hasStatus(attacker, STATUS.ATK_DOWN)) {
-    aAtk = Math.max(1, Math.floor(aAtk * 0.70));
-  }
+// ATK Down stacks (default 30% each if meta missing)
+const atkDownPct = sumStatusPct(attacker, STATUS.ATK_DOWN, 30);
+if (atkDownPct > 0){
+  const m = 1 - (atkDownPct / 100);
+  aAtk = Math.max(0, Math.ceil(aAtk * m)); // ceil per your rule
+}
 
-  // DEF Up increases defender mitigation (uses meta.pct if present, defaults to 30%)
-  const defUp = (target?.statuses || []).find(s => s.name === STATUS.DEF_UP && s.turns > 0);
-  if (defUp){
-    const pctUp = Number(defUp.meta?.pct ?? 30);
-    tDef = Math.floor(tDef * (1 + (pctUp / 100)));
-  }
+// DEF Up stacks (default 30% each if meta missing)
+const defUpPct = sumStatusPct(target, STATUS.DEF_UP, 30);
+if (defUpPct > 0){
+  const m = 1 + (defUpPct / 100);
+  tDef = Math.max(0, Math.ceil(tDef * m)); // ceil per your rule
+}
+
 
   // prototype formula
   const base = aAtk * (pct / 100);
@@ -411,6 +447,21 @@ function applySkill(state, actor, actorUnit, skillId, target){
       addStatus(u, STATUS.REFLECT, turns, { pct: def.reflectPct });
       log(state, `${u.name} gains Reflect (${turns}t).`);
     }
+
+    // Revive support: if target is dead and def.revivePct is set, bring them back.
+    if (def.revivePct != null && u && !isAlive(u)){
+      const pct = Math.max(1, Math.floor(Number(def.revivePct) || 1));
+      const hp = Math.max(1, Math.floor((u.maxHp || 1) * (pct / 100)));
+      u.hp = hp;
+      log(state, `${u.name} is revived with ${hp} HP.`);
+    }
+
+    // Extra turn support (e.g., Sirenia ultimate)
+    if (def.grantExtraTurn && u){
+      // Make them act soon by pulling their next act time to "now"
+      u.nextActAt = Math.min(u.nextActAt || 0, state.now + 1);
+      log(state, `${u.name} gains an extra turn!`);
+    }
   };
 
   // ===== main effect =====
@@ -478,11 +529,8 @@ function applySkill(state, actor, actorUnit, skillId, target){
       }
     }
 
-    // Hybrid skills can also carry status payloads, handled below.
-
   } else if (def.kind === "buff" || def.kind === "utility" || def.kind === "support" || def.kind === "control" || def.kind === "debuff"){
     logUse();
-    // Let status payload do most work; also support custom shield/reflect fields.
     applyExtraFieldsSingleTarget();
 
   } else {
@@ -490,19 +538,66 @@ function applySkill(state, actor, actorUnit, skillId, target){
   }
 
   // apply status payload if any
-  if (def.status){
-    applyStatusPayload(state, actorUnit, def.status, tgt);
-  }
+// apply status payload if any
+if (def.status) {
+  applyStatusPayload(state, actorUnit, def.status, tgt);
+}
 
-  // Apply extra fields even for damage/heal/etc if present (e.g. utility shield without kind=shield)
+if (Array.isArray(def.statuses)) {
+  for (const st of def.statuses) {
+    applyStatusPayload(state, actorUnit, st, tgt);
+  }
+}
+
+
+  // Apply extra fields even for damage/heal/etc if present
   if ((def.shield || def.reflectPct) && def.kind !== 'buff' && def.kind !== 'utility' && def.kind !== 'support' && def.kind !== 'control' && def.kind !== 'debuff'){
     applyExtraFieldsSingleTarget();
+  }
+
+  /* ============================
+     FIXED: self-effects + revive
+     (no "skill", no "caster")
+  ============================ */
+
+  // --- Self effects (ex: Caelum Spiral Dash) ---
+  if (def?.self?.shieldPctAtk) {
+    const pctAtk = Number(def.self.shieldPctAtk || 0);
+    if (pctAtk > 0){
+      const amt = Math.max(1, Math.floor((actorUnit.atk || 1) * (pctAtk / 100)));
+      addShieldPts(actorUnit, amt);
+      // Optional turn tracking if you later implement expiring shields:
+      if (def.self.turns) actorUnit._shieldTurns = Math.max(actorUnit._shieldTurns || 0, Math.floor(def.self.turns));
+    }
+  }
+const allowDead = !!def.canTargetDead;
+
+  // --- Revive (Sirenia Ultimate) ---
+  // Works for single-target payloads by resolving the real unit from tgt.
+  if (def?.revivePct != null){
+    const u = resolveSingleTarget(state, actorUnit, tgt, { allowDead });
+    if (u && !isAlive(u)){
+      const pctR = Math.max(1, Math.floor(Number(def.revivePct) || 1));
+      const hp = Math.max(1, Math.floor((u.maxHp || 1) * (pctR / 100)));
+      u.hp = hp;
+      log(state, `${u.name} is revived with ${hp} HP.`);
+
+      // Clear common disable states on revive (keep this conservative)
+      if (Array.isArray(u.statuses)){
+        u.statuses = u.statuses.filter(st => {
+          const id = String(st?.id || st?.name || st || "").toLowerCase();
+          return !["stun","freeze","loop lock","looplock"].includes(id);
+        });
+      }
+    }
   }
 
   return { ok:true, def };
 }
 
-function resolveSingleTarget(state, actorUnit, tgt){
+
+function resolveSingleTarget(state, actorUnit, tgt, opts={}){
+  const allowDead = !!opts.allowDead;
   if (!tgt) return null;
   if (tgt.mode === "self") return actorUnit;
 
@@ -522,47 +617,79 @@ function resolveSingleTarget(state, actorUnit, tgt){
 }
 
 function applyStatusPayload(state, actorUnit, status, tgt){
-  const name = status.name || "Status";
-  const turns = Math.max(1, Math.floor(status.turns || 1));
-  const target = status.target || "enemy";
-  const pct = status.chance ?? 100;
+  const name = status?.name || "Status";
+  const turns = Math.max(1, Math.floor(status?.turns || 1));
+  const targetMode = status?.target || "enemy";
+  const pct = (status?.chance ?? 100);
 
+  // Roll once for the payload itself (keeps behavior stable)
   if (!chance(pct)){
     log(state, `${name} failed to apply.`);
     return;
   }
 
+  // Decide if the status is negative (debuff/ailment)
+  const isNegative = (() => {
+    if (status?.isDebuff === true) return true;
+    const n = String(name).toLowerCase();
+    return (
+      n.includes("down") ||
+      n.includes("burn") ||
+      n.includes("poison") ||
+      n.includes("bleed") ||
+      n.includes("stun") ||
+      n.includes("freeze") ||
+      n.includes("silence") ||
+      n.includes("slow") ||
+      n.includes("vuln") ||
+      n.includes("weaken") ||
+      n.includes("taunt")
+    );
+  })();
+
   const applyTo = (u) => {
     if (!u || !isAlive(u)) return;
-    // Stealth: just flag it; targeting logic can respect later.
-    addStatus(u, name, turns);
+
+    // RESIST UP: only blocks negative statuses
+    if (isNegative){
+      // Stack all Resist Up meta.pct values on the target, cap at 95%
+      const resistPct = clamp(sumStatusPct(u, STATUS.RES_UP, 0), 0, 95);
+      if (resistPct > 0 && chance(resistPct)){
+        log(state, `${u.name} resisted ${name}!`);
+        return;
+      }
+    }
+
+    // IMPORTANT: keep meta so pct values show in UI + affect math elsewhere
+    addStatus(u, name, turns, status?.meta || null);
     log(state, `${u.name} gains ${name} (${turns}t).`);
   };
 
-  if (target === "self"){
+  // ---- Target routing ----
+  if (targetMode === "self"){
     applyTo(actorUnit);
     return;
   }
 
-  if (target === "enemy"){
+  if (targetMode === "enemy" || targetMode === "ally"){
     const u = resolveSingleTarget(state, actorUnit, tgt);
     if (u) applyTo(u);
     return;
   }
 
-  if (target === "all_enemies"){
+  if (targetMode === "all_enemies"){
     const list = actorUnit.side === "hero" ? state.enemies : state.heroes;
     for (const u of list) applyTo(u);
     return;
   }
 
-  if (target === "all_allies"){
+  if (targetMode === "all_allies"){
     const list = actorUnit.side === "hero" ? state.heroes : state.enemies;
     for (const u of list) applyTo(u);
     return;
   }
 
-  if (target === "ally_random"){
+  if (targetMode === "ally_random"){
     const list = actorUnit.side === "hero" ? state.heroes : state.enemies;
     const living = listLivingIndices(list);
     if (!living.length) return;
@@ -570,9 +697,17 @@ function applyStatusPayload(state, actorUnit, status, tgt){
     return;
   }
 
-  // Not implemented but won't crash
-  log(state, `[TODO] Status target '${target}' not implemented yet.`);
+  if (targetMode === "enemy_random"){
+    const list = actorUnit.side === "hero" ? state.enemies : state.heroes;
+    const living = listLivingIndices(list);
+    if (!living.length) return;
+    applyTo(list[living[irand(living.length)]]);
+    return;
+  }
+
+  log(state, `[TODO] Status target '${targetMode}' not implemented yet.`);
 }
+
 
 function enemyChooseAction(state, enemy){
   // Simple AI:
@@ -620,11 +755,12 @@ function pickHeroTargetForEnemy(state){
 export function createBattleEngine({ battleDef, teamIds }){
   const def = battleDef || {};
 
-  const heroes = (teamIds || []).filter(Boolean).slice(0, 4).map(makeHeroUnit);
+  const heroes = (teamIds || []).filter(Boolean).slice(0, 5).map(makeHeroUnit);
   const avgLvl = heroes.length ? (heroes.reduce((a,h)=>a+(h.level||1),0) / heroes.length) : 1;
   const enemyScaleMult = clamp(0.85 + avgLvl * 0.04, 0.85, 3.5);
 
   const waves = Array.isArray(def.waves) && def.waves.length ? def.waves : null;
+  const waveInterludes = def.waveInterludes || def.interludes || null;
   const enemies = (waves ? (waves[0] || []) : (def.enemies || [])).map((e,i)=>makeEnemyUnit(e,i,enemyScaleMult));
 
   const state = {
@@ -637,6 +773,7 @@ export function createBattleEngine({ battleDef, teamIds }){
 
     waves,
     waveIndex: waves ? 0 : -1,
+    interlude: null, // { title, text }
 
     // actor that currently has the turn
     active: null, // { side, idx }
@@ -668,6 +805,11 @@ export function createBattleEngine({ battleDef, teamIds }){
     // reset enemy time so they enter fairly
     for (const u of state.enemies){ u.t = 0; }
     log(state, `Wave ${idx+1}/${waves.length} begins.`);
+    // optional narrative/interlude between waves
+    const il = Array.isArray(waveInterludes) ? waveInterludes[idx] : (waveInterludes && waveInterludes[idx]);
+    if (il && (il.title || il.text)){
+      state.interlude = { title: il.title || `Wave ${idx+1}`, text: il.text || '' };
+    }
     // pick next actor fresh
     state.active = pickNextActor(state);
     state.waitingForInput = state.active?.side === "hero";
@@ -688,6 +830,7 @@ export function createBattleEngine({ battleDef, teamIds }){
   }
 
   function runEnemyAutoUntilInput(){
+    if (state.interlude) return;
     // keep resolving enemy turns until it's hero input or battle ends
     let guard = 0;
     while (!state.winner && state.active && state.active.side === "enemy" && guard < 50){
@@ -725,6 +868,8 @@ export function createBattleEngine({ battleDef, teamIds }){
 
   function heroAttack(targetIdx){
     if (!state.active || state.active.side !== "hero" || state.winner) return { ok:false };
+    if (state.interlude) return { ok:false, reason:"Interlude" };
+    if (state.interlude) return { ok:false, reason:"Interlude" };
     const hero = state.heroes[state.active.idx];
     const enemy = state.enemies[targetIdx];
     if (!hero || !isAlive(hero) || !enemy || !isAlive(enemy)) return { ok:false };
@@ -734,6 +879,13 @@ export function createBattleEngine({ battleDef, teamIds }){
       log(state, `${hero.name} is frozen and cannot act.`);
       endTurnForActive();
       return { ok:true, skipped:true };
+    // stun
+    if (hasStatus(hero, STATUS.STUN)){
+      log(state, `${hero.name} is stunned and cannot act.`);
+      endTurnForActive();
+      return { ok:true, skipped:true };
+    }
+
     }
 
     const dmg = computeDamage(hero, enemy, 100);
@@ -858,6 +1010,14 @@ export function createBattleEngine({ battleDef, teamIds }){
     return { side: actorSide === "hero" ? "enemy" : "hero", idx: fallbackIdx, mode: "single" };
   }
 
+  function continueInterlude(){
+    if (!state.interlude) return { ok:false };
+    state.interlude = null;
+    // If it's currently enemy turn, continue auto until hero input
+    if (state.active?.side === "enemy") runEnemyAutoUntilInput();
+    return { ok:true };
+  }
+
   function getUIState(){
     // small helper the UI can use
     const a = state.active;
@@ -875,6 +1035,10 @@ export function createBattleEngine({ battleDef, teamIds }){
       active: state.active,
       activeUnit,
       waitingForInput: state.waitingForInput,
+
+      waves: state.waves ? state.waves.length : 0,
+      waveIndex: state.waveIndex,
+      interlude: state.interlude,
 
       log: state.log,
     };
@@ -911,6 +1075,7 @@ export function createBattleEngine({ battleDef, teamIds }){
   return {
     state,
     getUIState,
+    continueInterlude,
 
     // Turn methods
     heroAttack,
