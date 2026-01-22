@@ -9,9 +9,10 @@ import { startBattle } from "../battle/battle.ui.js";
 // Story Runner (Chapter Select + Fullscreen Pacing Overlay)
 // - One beat at a time (tap to advance)
 // - Chapters locked sequentially until prior chapter complete
-// - Progress saved at SEGMENT level (not line). Leaving mid-segment restarts the segment.
-// - Battles are requested via CustomEvent:  EE_STORY_REQUEST_BATTLE
-//   Battle results should dispatch:         EE_STORY_BATTLE_RESULT  { battleId, won, canceled }
+// - Progress saved at SEGMENT level (leaving mid-segment restarts the segment)
+// - Battles are requested via startBattle() (preferred) or CustomEvent fallback
+// - Battle results should dispatch: EE_STORY_BATTLE_RESULT { battleId, won, canceled }
+//   or EE_BATTLE_RESOLVED { battleId, result: { winner|won|canceled|aborted } }
 // ============================================================
 
 const STORE_KEY = "EE_STORY_STATE_V1";
@@ -68,6 +69,54 @@ const CHAPTER_DATA = {
   // ch02..ch10 later
 };
 
+// ------------------------------------------------------------
+// Store
+// ------------------------------------------------------------
+function safeParse(json, fallback) {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return fallback;
+  }
+}
+
+function defaultStore() {
+  return {
+    completed: {},
+    progress: {},
+    flags: {},
+    battleWins: {},
+  };
+}
+
+function loadStore() {
+  const raw = localStorage.getItem(STORE_KEY);
+  const base = defaultStore();
+  if (!raw) return base;
+  const s = safeParse(raw, base);
+  s.completed = s.completed && typeof s.completed === "object" ? s.completed : {};
+  s.progress = s.progress && typeof s.progress === "object" ? s.progress : {};
+  s.flags = s.flags && typeof s.flags === "object" ? s.flags : {};
+  s.battleWins = s.battleWins && typeof s.battleWins === "object" ? s.battleWins : {};
+  return s;
+}
+
+function saveStore(s) {
+  localStorage.setItem(STORE_KEY, JSON.stringify(s));
+}
+
+function isLocked(chId) {
+  if (chId === "ch01") return false;
+  const idx = CHAPTER_ORDER.indexOf(chId);
+  const prev = idx > 0 ? CHAPTER_ORDER[idx - 1] : null;
+  if (!prev) return false;
+  const store = loadStore();
+  return !store.completed?.[prev];
+}
+
+// ------------------------------------------------------------
+// Unlocks
+// ------------------------------------------------------------
 function getUnlockSpec(chId) {
   const ch = CHAPTER_DATA?.[chId];
   const raw = ch?.unlocks || FALLBACK_CHAPTER_UNLOCKS?.[chId] || {};
@@ -166,6 +215,9 @@ function reconcileHeroUnlocksFromStoryState() {
   window.EE_TICK?.();
 }
 
+// ------------------------------------------------------------
+// Modal race helper
+// ------------------------------------------------------------
 /**
  * Fix: don't re-open story overlay until Victory/Rewards finishes.
  *
@@ -175,11 +227,9 @@ function reconcileHeroUnlocksFromStoryState() {
  */
 function waitForModalOpenThenCloseThen(fn, { openWaitMs = 1200 } = {}) {
   const mh = document.getElementById("modalHost");
-  if (!mh) {
-    fn();
-    return;
-  }
+  if (!mh) return fn();
 
+  // If it's already open, just wait for close.
   if (mh.classList.contains("on")) {
     const obsClose = new MutationObserver(() => {
       if (!mh.classList.contains("on")) {
@@ -196,8 +246,8 @@ function waitForModalOpenThenCloseThen(fn, { openWaitMs = 1200 } = {}) {
 
   const obs = new MutationObserver(() => {
     if (done) return;
-
     const isOn = mh.classList.contains("on");
+
     if (!sawOpen && isOn) {
       sawOpen = true;
       return;
@@ -221,71 +271,10 @@ function waitForModalOpenThenCloseThen(fn, { openWaitMs = 1200 } = {}) {
   }, openWaitMs);
 }
 
-function safeParse(json, fallback) {
-  try {
-    return JSON.parse(json);
-  } catch {
-    return fallback;
-  }
-}
-
-function isJunkStoryLine(s) {
-  const t = String(s || "").trim();
-  if (!t) return true;
-
-  if (/^(✅|🎼|🧿|🎁|🎭)\s*/.test(t)) return true;
-  if (/^(Version|Notes)\s*:/i.test(t)) return true;
-  if (/IMPLEMENTATION PACKAGE/i.test(t)) return true;
-  if (/^(SCENE BACKGROUNDS|BATTLE PACK|UNLOCKS|CHOICES)/i.test(t)) return true;
-
-  if (/^(Cutscene Dialogue|Full Dialogue Sequence)\s*:?\s*$/i.test(t)) return true;
-
-  if (/^(Title|Enemies|Tag|Waves|Rewards|Special|Gimmick|Phases)\s*:/i.test(t)) return true;
-
-  if (/^(bg_[a-z0-9_]+|ms_[a-z0-9_]+)$/i.test(t)) return true;
-
-  return false;
-}
-
-function defaultStore() {
-  return {
-    completed: {},
-    progress: {},
-    flags: {},
-    battleWins: {},
-  };
-}
-
-function loadStore() {
-  const raw = localStorage.getItem(STORE_KEY);
-  const base = defaultStore();
-  if (!raw) return base;
-  const s = safeParse(raw, base);
-  s.completed = s.completed && typeof s.completed === "object" ? s.completed : {};
-  s.progress = s.progress && typeof s.progress === "object" ? s.progress : {};
-  s.flags = s.flags && typeof s.flags === "object" ? s.flags : {};
-  s.battleWins = s.battleWins && typeof s.battleWins === "object" ? s.battleWins : {};
-  return s;
-}
-
-function saveStore(s) {
-  localStorage.setItem(STORE_KEY, JSON.stringify(s));
-}
-
-function isLocked(chId) {
-  if (chId === "ch01") return false;
-  const idx = CHAPTER_ORDER.indexOf(chId);
-  const prev = idx > 0 ? CHAPTER_ORDER[idx - 1] : null;
-  if (!prev) return false;
-  const store = loadStore();
-  return !store.completed?.[prev];
-}
-
 // ------------------------------------------------------------
 // Overlay UI
 // ------------------------------------------------------------
 let mounted = false;
-let hostEl = null;
 let overlayEl = null;
 let ui = null;
 
@@ -295,6 +284,10 @@ const run = {
   beatIndex: 0,
   waitingBattleId: null,
   justCompleted: false,
+
+  // Used to prevent “progress snapback” after battle results.
+  // When a battle is started, we record what segment we were in at start time.
+  battleStartSegmentId: null,
 };
 
 function ensureStyle() {
@@ -426,7 +419,10 @@ function portraitHtmlFor(spec) {
     }
     const src = `./assets/heroes/portraits/hero_${id}_p.png`;
     const fallback = (id || "").slice(0, 3).toUpperCase() || "YOU";
-    const onerr = `this.onerror=null;const p=this.parentElement;if(p){p.innerHTML='<div class=\\'eeStoryPortraitFallback\\'>${fallback}</div>';}`;
+    const onerr =
+      "this.onerror=null;const p=this.parentElement;if(p){p.innerHTML='<div class=\\'eeStoryPortraitFallback\\'>" +
+      fallback +
+      "</div>';}";
     return `<img src="${src}" alt="${id}" onerror="${onerr}">`;
   }
 
@@ -434,12 +430,16 @@ function portraitHtmlFor(spec) {
     const id = s.slice(6);
     const srcA = `./assets/enemies/portraits/enemy_${id}_p.png`;
     const srcB = `./assets/story/enemies/enemy_${id}_p.png`;
-    const onerr = `this.onerror=null; if (this.src.includes('/assets/enemies/portraits/')) { this.src='${srcB}'; return; } const p=this.parentElement; if(p){p.innerHTML='<div class=\\'eeStoryPortraitFallback\\'>ENEMY</div>';}`;
+    const onerr =
+      "this.onerror=null; if (this.src.includes('/assets/enemies/portraits/')) { this.src='" +
+      srcB +
+      "'; return; } const p=this.parentElement; if(p){p.innerHTML='<div class=\\'eeStoryPortraitFallback\\'>ENEMY</div>';}";
     return `<img src="${srcA}" alt="${id}" onerror="${onerr}">`;
   }
 
   if (s.startsWith("./") || s.startsWith("assets/")) {
-    const onerr = `this.onerror=null;const p=this.parentElement;if(p){p.innerHTML='<div class=\\'eeStoryPortraitFallback\\'>---</div>';}`;
+    const onerr =
+      "this.onerror=null;const p=this.parentElement;if(p){p.innerHTML='<div class=\\'eeStoryPortraitFallback\\'>---</div>';}";
     return `<img src="${s}" alt="portrait" onerror="${onerr}">`;
   }
 
@@ -450,99 +450,87 @@ function portraitHtmlFor(spec) {
 // Public API
 // ------------------------------------------------------------
 export function mountStory(hostIdOrEl) {
-  hostEl = typeof hostIdOrEl === "string" ? document.getElementById(hostIdOrEl) : hostIdOrEl;
+  // host is optional now (overlay attaches to body); kept for compatibility
   ensureOverlay();
 
-  if (!mounted) {
-    mounted = true;
+  if (mounted) return;
+  mounted = true;
 
-    reconcileHeroUnlocksFromStoryState();
+  reconcileHeroUnlocksFromStoryState();
 
-    const handleBattleResultDetail = (d) => {
-      const payload = d || {};
-      if (!payload.battleId) return;
-      if (!run.waitingBattleId || payload.battleId !== run.waitingBattleId) return;
+  const handleBattleResultDetail = (d) => {
+    const payload = d || {};
+    if (!payload.battleId) return;
+    if (!run.waitingBattleId || payload.battleId !== run.waitingBattleId) return;
 
-      const chId = run.chapterId;
-      const segNow = getSegment();
-      const beatNow = getBeat();
+    const chId = run.chapterId;
+    const battleStartedInSeg = run.battleStartSegmentId || run.segmentId;
 
-      if (payload.won) {
-        applyBattleUnlocks(chId, payload.battleId);
+    // Always clear waiting state first so UI can proceed.
+    run.waitingBattleId = null;
+    run.battleStartSegmentId = null;
 
-        if (segNow?.next) setProgressSegment(chId, segNow.next);
-
-
-        run.waitingBattleId = null;
-
-        waitForModalOpenThenCloseThen(() => {
-          showOverlay(true);
-          if (beatNow?.t === "battle") nextBeat();
-          else render();
-        });
-
-        return;
-      }
-
-      if (payload.canceled || payload.aborted || payload.won === false) {
-        run.waitingBattleId = null;
-        waitForModalOpenThenCloseThen(() => {
-          showOverlay(true);
-          render();
-        });
-      }
+    const resume = () => {
+      showOverlay(true);
+      // Re-sync to the current segment/beat and render from there.
+      // (This prevents “snap back” where render() re-saves old progress.)
+      render();
     };
 
-    // Legacy / external battle screen contract
-    window.addEventListener("EE_STORY_BATTLE_RESULT", (ev) => {
-      handleBattleResultDetail(ev?.detail || {});
-    });
+    if (payload.won) {
+      // Record a win if you want it later
+      try {
+        const s = loadStore();
+        s.battleWins ||= {};
+        s.battleWins[payload.battleId] = true;
+        saveStore(s);
+      } catch (e) {}
 
-    // Direct battle UI contract (battle.ui.js can dispatch this)
-    window.addEventListener("EE_BATTLE_RESOLVED", (ev) => {
-      const raw = ev?.detail || {};
-      const battleId = raw.battleId;
-      const r = raw.result || {};
-      const d = { battleId };
+      applyBattleUnlocks(chId, payload.battleId);
 
-      if (typeof r.won === "boolean") d.won = r.won;
-      else if (r.winner === "heroes") d.won = true;
-      else if (r.winner === "enemies") d.won = false;
-      else if (r.canceled || r.aborted) d.canceled = true;
-      else d.canceled = true;
+      // Advance progress to the next segment *based on the segment that contained the battle*,
+      // not whatever render() last looked at.
+      const ch = CHAPTER_DATA?.[chId];
+      const segAtStart = ch?.segments?.[battleStartedInSeg] || getSegment();
+      if (segAtStart?.next) {
+        run.segmentId = segAtStart.next;
+        run.beatIndex = 0;
+        setProgressSegment(chId, segAtStart.next);
+      } else {
+        // No next segment, we'll treat as chapter complete.
+        // Keep run.segmentId as-is and let render() fall into completion screen.
+      }
 
-      handleBattleResultDetail(d);
-    });
+      waitForModalOpenThenCloseThen(resume);
+      return;
+    }
 
-  }
-}
+    // canceled / aborted / lost: resume without advancing
+    waitForModalOpenThenCloseThen(resume);
+  };
 
-function linearizeSegments(ch) {
-  const out = [];
-  const seen = new Set();
-  let cur = ch?.start || null;
+  window.addEventListener("EE_STORY_BATTLE_RESULT", (ev) => {
+    handleBattleResultDetail(ev?.detail || {});
+  });
 
-  while (cur && !seen.has(cur)) {
-    seen.add(cur);
-    out.push(cur);
-    const seg = ch.segments?.[cur];
-    cur = seg?.next || null;
-  }
+  window.addEventListener("EE_BATTLE_RESOLVED", (ev) => {
+    const raw = ev?.detail || {};
+    const battleId = raw.battleId;
+    const r = raw.result || {};
+    const d = { battleId };
 
-  if (!out.length) {
-    return Object.keys(ch?.segments || {});
-  }
-  return out;
-}
+    if (typeof r.won === "boolean") d.won = r.won;
+    else if (r.winner === "heroes") d.won = true;
+    else if (r.winner === "enemies") d.won = false;
+    else if (r.canceled || r.aborted) d.canceled = true;
+    else d.canceled = true;
 
-function progressIndexFor(order, progId) {
-  const i = order.indexOf(progId);
-  return i >= 0 ? i : 0;
+    handleBattleResultDetail(d);
+  });
 }
 
 export function openChapterSelect() {
   ensureOverlay();
-
   const store = loadStore();
 
   const modalStyles = `
@@ -563,23 +551,21 @@ export function openChapterSelect() {
     </style>
   `;
 
-  const rows = CHAPTER_ORDER
-    .map((chId) => {
-      const meta = CHAPTER_META[chId] || { label: chId.toUpperCase(), title: "" };
-      const locked = isLocked(chId);
-      const done = !!store.completed?.[chId];
-      const prog = store.progress?.[chId];
+  const rows = CHAPTER_ORDER.map((chId) => {
+    const meta = CHAPTER_META[chId] || { label: chId.toUpperCase(), title: "" };
+    const locked = isLocked(chId);
+    const done = !!store.completed?.[chId];
+    const prog = store.progress?.[chId];
 
-      const right = done
-        ? `<span class="pill gold">COMPLETE</span>`
-        : locked
-          ? `<span class="pill">LOCKED</span>`
-          : `<span class="pill">UNLOCKED</span>`;
+    const right = done
+      ? `<span class="pill gold">COMPLETE</span>`
+      : locked
+        ? `<span class="pill">LOCKED</span>`
+        : `<span class="pill">UNLOCKED</span>`;
 
-      const ch = CHAPTER_DATA[chId];
-
-      if (!ch) {
-        return `
+    const ch = CHAPTER_DATA[chId];
+    if (!ch) {
+      return `
         <details class="eeCh" ${chId === "ch01" ? "open" : ""}>
           <summary>
             <div class="eeChHdr">
@@ -594,45 +580,45 @@ export function openChapterSelect() {
           <div class="muted">${locked ? "Locked. Complete the prior chapter first." : "Chapter steps not wired yet."}</div>
         </details>
       `;
-      }
+    }
 
-      const order = linearizeSegments(ch);
-      const progSeg = prog || ch.start;
-      const unlockedIdx = done ? order.length - 1 : progressIndexFor(order, progSeg);
+    const order = linearizeSegments(ch);
+    const progSeg = prog || ch.start;
+    const unlockedIdx = done ? order.length - 1 : Math.max(0, order.indexOf(progSeg));
 
-      const segRows = order
-        .map((segId, i) => {
-          const seg = ch.segments?.[segId];
-          const segTitle = seg?.title || "";
-          const isUnlockedSeg = !locked && (done || i <= unlockedIdx);
-          const isCurrent = segId === progSeg && !done;
+    const segRows = order
+      .map((segId, i) => {
+        const seg = ch.segments?.[segId];
+        const segTitle = seg?.title || "";
+        const isUnlockedSeg = !locked && (done || i <= unlockedIdx);
+        const isCurrent = segId === progSeg && !done;
 
-          const segPill = done
-            ? `<span class="pill gold">OK</span>`
-            : isUnlockedSeg
-              ? `<span class="pill">UNLOCKED</span>`
-              : `<span class="pill">LOCKED</span>`;
+        const segPill = done
+          ? `<span class="pill gold">OK</span>`
+          : isUnlockedSeg
+            ? `<span class="pill">UNLOCKED</span>`
+            : `<span class="pill">LOCKED</span>`;
 
-          const btn = isUnlockedSeg
-            ? `<button class="btn ${isCurrent ? "primary" : ""}" data-ch="${chId}" data-seg="${segId}">${isCurrent ? "Resume" : "Start"}</button>`
-            : `<button class="btn" disabled>Locked</button>`;
+        const btn = isUnlockedSeg
+          ? `<button class="btn ${isCurrent ? "primary" : ""}" data-ch="${chId}" data-seg="${segId}">${isCurrent ? "Resume" : "Start"}</button>`
+          : `<button class="btn" disabled>Locked</button>`;
 
-          return `
-        <div class="eeSegRow">
-          <div class="eeSegLeft">
-            <div class="eeSegTitle">${segId}</div>
-            <div class="eeSegSub">${segTitle}</div>
+        return `
+          <div class="eeSegRow">
+            <div class="eeSegLeft">
+              <div class="eeSegTitle">${segId}</div>
+              <div class="eeSegSub">${segTitle}</div>
+            </div>
+            <div class="eeSegBtns">
+              ${segPill}
+              ${btn}
+            </div>
           </div>
-          <div class="eeSegBtns">
-            ${segPill}
-            ${btn}
-          </div>
-        </div>
-      `;
-        })
-        .join("");
+        `;
+      })
+      .join("");
 
-      return `
+    return `
       <details class="eeCh" ${chId === "ch01" ? "open" : ""}>
         <summary>
           <div class="eeChHdr">
@@ -647,24 +633,23 @@ export function openChapterSelect() {
         ${locked ? `<div class="muted">Locked. Complete the prior chapter first.</div>` : segRows}
       </details>
     `;
-    })
-    .join("");
+  }).join("");
 
   openModal(
     "Story Chapters",
     `
-    ${modalStyles}
-    <div class="card">
-      <div class="h2">Choose a Chapter</div>
-      <div class="muted">Tap a chapter to drop down sections. Locked sections stay visible.</div>
-    </div>
-    <div style="height:12px"></div>
-    ${rows}
-    <div style="height:12px"></div>
-    <div class="row wrap">
-      <button class="btn" data-close>Close</button>
-    </div>
-  `,
+      ${modalStyles}
+      <div class="card">
+        <div class="h2">Choose a Chapter</div>
+        <div class="muted">Tap a chapter to drop down sections. Locked sections stay visible.</div>
+      </div>
+      <div style="height:12px"></div>
+      ${rows}
+      <div style="height:12px"></div>
+      <div class="row wrap">
+        <button class="btn" data-close>Close</button>
+      </div>
+    `,
   );
 
   const mh = document.getElementById("modalHost");
@@ -703,8 +688,11 @@ export function resumeOrStartStory(chId = "ch01", segOverride = null) {
   run.segmentId = seg;
   run.beatIndex = 0;
   run.waitingBattleId = null;
+  run.battleStartSegmentId = null;
 
   showOverlay(true);
+  // Save progress ON START so leaving/resuming is consistent.
+  setProgressSegment(chId, seg);
   render();
 }
 
@@ -727,6 +715,26 @@ function getBeat() {
   return seg.beats?.[run.beatIndex] || null;
 }
 
+function linearizeSegments(ch) {
+  const out = [];
+  const seen = new Set();
+  let cur = ch?.start || null;
+
+  while (cur && !seen.has(cur)) {
+    seen.add(cur);
+    out.push(cur);
+    const seg = ch.segments?.[cur];
+    cur = seg?.next || null;
+  }
+
+  if (!out.length) return Object.keys(ch?.segments || {});
+  return out;
+}
+
+/**
+ * Only moves progress FORWARD through the linear order.
+ * This prevents old renders (or bad seg jumps) from snapping progress backward.
+ */
 function setProgressSegment(chId, segId) {
   const s = loadStore();
   s.progress ||= {};
@@ -744,6 +752,7 @@ function setProgressSegment(chId, segId) {
   const newIdx = order.indexOf(segId);
 
   if (newIdx < 0) {
+    // Unknown segment id: store it, but don’t try to “order” it.
     s.progress[chId] = segId;
     saveStore(s);
     return;
@@ -775,14 +784,15 @@ function markChapterComplete(chId) {
 
 function exitStory() {
   run.waitingBattleId = null;
+  run.battleStartSegmentId = null;
   showOverlay(false);
 
-  // If we just completed a chapter, bounce the user to Chapter Select next time.
   if (run.justCompleted) {
     run.justCompleted = false;
-    // Give the UI a beat to settle before opening picker
     setTimeout(() => {
-      try { openChapterSelect(); } catch(e) {}
+      try {
+        openChapterSelect();
+      } catch (e) {}
     }, 0);
   }
 }
@@ -790,10 +800,10 @@ function exitStory() {
 function nextBeat() {
   const seg = getSegment();
   if (!seg) return;
-
   if (run.waitingBattleId) return;
 
   run.beatIndex++;
+
   if (run.beatIndex < (seg.beats?.length || 0)) {
     render();
     return;
@@ -828,7 +838,7 @@ function showChapterComplete() {
   ui.choice.style.display = "none";
   ui.battle.style.display = "flex";
   ui.battle.innerHTML = `
-    <button class="btn primary" data-exit>Back to Battle</button>
+    <button class="btn primary" data-exit>Back</button>
     <button class="btn" data-chapters>Chapter Select</button>
   `;
   ui.hint.textContent = "";
@@ -838,6 +848,9 @@ function showChapterComplete() {
   ui.battle.querySelector("[data-chapters]")?.addEventListener("click", () => openChapterSelect());
 }
 
+// ------------------------------------------------------------
+// Skip menu
+// ------------------------------------------------------------
 function openSkipMenu() {
   openModal(
     "Skip",
@@ -879,6 +892,7 @@ function skipToNextBattle() {
   while (segId) {
     const seg = ch.segments?.[segId];
     if (!seg) break;
+
     for (let i = idx; i < (seg.beats?.length || 0); i++) {
       const b = seg.beats[i];
       if (b && b.t === "battle") {
@@ -889,6 +903,7 @@ function skipToNextBattle() {
         return;
       }
     }
+
     segId = seg.next;
     idx = 0;
   }
@@ -917,20 +932,38 @@ function skipToFinalBattle() {
   openModal("Not found", `<div class="card"><div class="muted">Final battle not found in step data.</div></div>`);
 }
 
+// ------------------------------------------------------------
+// Beat rendering
+// ------------------------------------------------------------
+function isJunkStoryLine(s) {
+  const t = String(s || "").trim();
+  if (!t) return true;
+
+  if (/^(✅|🎼|🧿|🎁|🎭)\s*/.test(t)) return true;
+  if (/^(Version|Notes)\s*:/i.test(t)) return true;
+  if (/IMPLEMENTATION PACKAGE/i.test(t)) return true;
+  if (/^(SCENE BACKGROUNDS|BATTLE PACK|UNLOCKS|CHOICES)/i.test(t)) return true;
+  if (/^(Cutscene Dialogue|Full Dialogue Sequence)\s*:?\s*$/i.test(t)) return true;
+  if (/^(Title|Enemies|Tag|Waves|Rewards|Special|Gimmick|Phases)\s*:/i.test(t)) return true;
+  if (/^(bg_[a-z0-9_]+|ms_[a-z0-9_]+)$/i.test(t)) return true;
+
+  return false;
+}
+
 function requestBattle(battleId) {
   run.waitingBattleId = battleId;
+  run.battleStartSegmentId = run.segmentId;
 
   // Hide pacing overlay while the battle UI takes over.
   showOverlay(false);
 
-  // Preferred: call the local battle UI directly.
   let started = false;
+
   try {
     if (typeof startBattle === "function") {
       startBattle(battleId);
       started = true;
 
-      // Optional: broadcast that the story started a battle (non-starting event).
       window.dispatchEvent(
         new CustomEvent("EE_STORY_BATTLE_STARTED", {
           detail: {
@@ -945,7 +978,6 @@ function requestBattle(battleId) {
     console.warn("[STORY] startBattle failed; falling back to EE_STORY_REQUEST_BATTLE", err);
   }
 
-  // Fallback: keep old contract for any external battle screen handler.
   if (!started) {
     window.dispatchEvent(
       new CustomEvent("EE_STORY_REQUEST_BATTLE", {
@@ -959,21 +991,23 @@ function requestBattle(battleId) {
   }
 }
 
-
 function render() {
   const chId = run.chapterId;
   const ch = getChapter();
   const seg = getSegment();
   let beat = getBeat();
-  if (!ch || !seg || !beat) return;
+  if (!ch || !seg) return;
 
-  if (run.beatIndex === 0) setProgressSegment(chId, run.segmentId);
-
+  // Cleanly skip junk lines; if we run off the end, advance segment properly.
   while (beat && beat.t === "line" && isJunkStoryLine(beat.text)) {
     run.beatIndex++;
     beat = getBeat();
   }
-  if (!beat) return;
+  if (!beat) {
+    // we exhausted beats after skipping junk
+    nextBeat();
+    return;
+  }
 
   const meta = CHAPTER_META[chId];
   ui.title.textContent = `${meta?.label || chId.toUpperCase()} • ${run.segmentId}`;

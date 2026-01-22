@@ -214,6 +214,30 @@ function log(state, msg){
   if (state.log.length > 120) state.log.shift();
 }
 
+// ---------------------------
+// Battle FX helpers
+// ---------------------------
+function refForUnit(state, unit){
+  if (!unit) return null;
+  const hi = state.heroes.indexOf(unit);
+  if (hi >= 0) return { side:"hero", idx:hi };
+  const ei = state.enemies.indexOf(unit);
+  if (ei >= 0) return { side:"enemy", idx:ei };
+  return null;
+}
+
+function vibeFromKind(kind){
+  const k = String(kind || "").toLowerCase().trim();
+  if (k === "damage") return "damage";
+  if (k === "heal") return "heal";
+  if (k === "shield") return "shield";
+  if (k === "debuff" || k === "control") return "debuff";
+  if (k === "hybrid") return "damage";
+  return "buff";
+}
+
+
+
 function applyDamage(state, target, amount, meta={}) {
   if (!target || !isAlive(target)) return 0;
   if (hasStatus(target, STATUS.INVULN)){
@@ -350,7 +374,7 @@ function canUseSkill(state, actorUnit, skillId){
   const cost = Math.max(0, Math.floor(def.energyCost || 0));
   if (cost > 0 && actorUnit.energy < cost) return { ok:false, reason:"Not ready" };
 
-  return { ok:true, def };
+  return { ok:true, def, };
 }
 
 function applySkill(state, actor, actorUnit, skillId, target){
@@ -358,6 +382,35 @@ function applySkill(state, actor, actorUnit, skillId, target){
   if (!chk.ok) return { ok:false, reason: chk.reason };
 
   const def = chk.def;
+
+  // FX summary for UI animations
+  const vibeFromKind = (k) => {
+    const kind = String(k || "").toLowerCase();
+    if (kind === "heal") return "heal";
+    if (kind === "shield") return "shield";
+    if (kind === "debuff" || kind === "control") return "debuff";
+    if (kind === "damage" || kind === "hybrid") return "damage";
+    return "buff";
+  };
+  const fx = {
+    kind: "skill",
+    vibe: vibeFromKind(def.kind),
+    from: { side: actor.side, idx: actor.idx },
+    targets: [],
+    numbers: []
+  };
+  const fxAddTarget = (u) => {
+    const r = refForUnit(state, u);
+    if (!r) return;
+    if (!fx.targets.some(t => t.side === r.side && t.idx === r.idx)) fx.targets.push(r);
+  };
+  const fxPush = (u, type, payload) => {
+    const r = refForUnit(state, u);
+    if (!r) return;
+    fxAddTarget(u);
+    fx.numbers.push({ side:r.side, idx:r.idx, type, ...(payload || {}) });
+
+  };
   actorUnit.lastSkillId = skillId;
   const cost = Math.max(0, Math.floor(def.energyCost || 0));
 
@@ -382,6 +435,7 @@ function applySkill(state, actor, actorUnit, skillId, target){
     const dmg = computeDamage(actorUnit, tUnit, pct);
     const dealt = applyDamage(state, tUnit, dmg, { attacker: actorUnit, skillId });
     log(state, `${actorUnit.name} hits ${tUnit.name} for ${dealt}.`);
+    fxPush(tUnit, "dmg", { amount: dealt });
     // lifesteal: heal % of actual HP damage dealt (post-shield)
     const ls = Number(def.lifestealPct ?? def.lifesteal ?? 0);
     if (ls > 0 && dealt > 0){
@@ -389,6 +443,7 @@ function applySkill(state, actor, actorUnit, skillId, target){
       const healAmt = Math.max(1, Math.floor(dealt * pctLS));
       actorUnit.hp = Math.min(actorUnit.maxHp, actorUnit.hp + healAmt);
       log(state, `${actorUnit.name} steals ${healAmt} HP.`);
+      fxPush(actorUnit, "heal", { amount: healAmt });
     }
   };
 
@@ -396,20 +451,25 @@ function applySkill(state, actor, actorUnit, skillId, target){
     const dmg = Math.max(1, Math.floor(flat || 1));
     const dealt = applyDamage(state, tUnit, dmg, { attacker: actorUnit, skillId });
     log(state, `${actorUnit.name} hits ${tUnit.name} for ${dealt}.`);
+    fxPush(tUnit, "dmg", { amount: dealt });
     const ls = Number(def.lifestealPct ?? def.lifesteal ?? 0);
     if (ls > 0 && dealt > 0){
       const pctLS = ls <= 1 ? ls : (ls / 100);
       const healAmt = Math.max(1, Math.floor(dealt * pctLS));
       actorUnit.hp = Math.min(actorUnit.maxHp, actorUnit.hp + healAmt);
       log(state, `${actorUnit.name} steals ${healAmt} HP.`);
+      fxPush(actorUnit, "heal", { amount: healAmt });
     }
   };
 
   const doHealTo = (tUnit, pct) => {
     const aAtk = Math.max(1, actorUnit.atk || 1);
     const heal = Math.max(1, Math.floor(aAtk * (pct / 100)));
+    const before = tUnit.hp;
     tUnit.hp = Math.min(tUnit.maxHp, tUnit.hp + heal);
-    log(state, `${actorUnit.name} heals ${tUnit.name} for ${heal}.`);
+    const delta = Math.max(0, tUnit.hp - before);
+    log(state, `${actorUnit.name} heals ${tUnit.name} for ${delta}.`);
+    fxPush(tUnit, "heal", { amount: delta });
   };
 
   const addShieldPts = (tUnit, pts) => {
@@ -417,6 +477,7 @@ function applySkill(state, actor, actorUnit, skillId, target){
     const cap = Math.floor((tUnit.maxHp || 100) * 2);
     tUnit.shield = Math.min(cap, Math.floor((tUnit.shield || 0) + add));
     log(state, `${tUnit.name} gains ${add} Shield.`);
+    fxPush(tUnit, "shield", { amount: add });
   };
 
   const doShieldTo = (tUnit, pct) => {
@@ -446,6 +507,7 @@ function applySkill(state, actor, actorUnit, skillId, target){
       const turns = Math.max(1, Math.floor(def.reflectTurns || 1));
       addStatus(u, STATUS.REFLECT, turns, { pct: def.reflectPct });
       log(state, `${u.name} gains Reflect (${turns}t).`);
+      fxPush(u, "buff", { label: "Reflect" });
     }
 
     // Revive support: if target is dead and def.revivePct is set, bring them back.
@@ -454,6 +516,7 @@ function applySkill(state, actor, actorUnit, skillId, target){
       const hp = Math.max(1, Math.floor((u.maxHp || 1) * (pct / 100)));
       u.hp = hp;
       log(state, `${u.name} is revived with ${hp} HP.`);
+      fxPush(u, "heal", { amount: hp, label: "Revive" });
     }
 
     // Extra turn support (e.g., Sirenia ultimate)
@@ -461,6 +524,7 @@ function applySkill(state, actor, actorUnit, skillId, target){
       // Make them act soon by pulling their next act time to "now"
       u.nextActAt = Math.min(u.nextActAt || 0, state.now + 1);
       log(state, `${u.name} gains an extra turn!`);
+      fxPush(u, "buff", { label: "Extra Turn" });
     }
   };
 
@@ -540,12 +604,12 @@ function applySkill(state, actor, actorUnit, skillId, target){
   // apply status payload if any
 // apply status payload if any
 if (def.status) {
-  applyStatusPayload(state, actorUnit, def.status, tgt);
+  applyStatusPayload(state, actorUnit, def.status, tgt, fx);
 }
 
 if (Array.isArray(def.statuses)) {
   for (const st of def.statuses) {
-    applyStatusPayload(state, actorUnit, st, tgt);
+    applyStatusPayload(state, actorUnit, st, tgt, fx);
   }
 }
 
@@ -580,7 +644,9 @@ const allowDead = !!def.canTargetDead;
       const pctR = Math.max(1, Math.floor(Number(def.revivePct) || 1));
       const hp = Math.max(1, Math.floor((u.maxHp || 1) * (pctR / 100)));
       u.hp = hp;
+      u.dead = false;
       log(state, `${u.name} is revived with ${hp} HP.`);
+      fxPush(u, "heal", { amount: hp, label: "Revive" });
 
       // Clear common disable states on revive (keep this conservative)
       if (Array.isArray(u.statuses)){
@@ -592,7 +658,7 @@ const allowDead = !!def.canTargetDead;
     }
   }
 
-  return { ok:true, def };
+  return { ok:true, def, fx };
 }
 
 
@@ -616,7 +682,7 @@ function resolveSingleTarget(state, actorUnit, tgt, opts={}){
   return null;
 }
 
-function applyStatusPayload(state, actorUnit, status, tgt){
+function applyStatusPayload(state, actorUnit, status, tgt, fx=null){
   const name = status?.name || "Status";
   const turns = Math.max(1, Math.floor(status?.turns || 1));
   const targetMode = status?.target || "enemy";
@@ -663,6 +729,22 @@ function applyStatusPayload(state, actorUnit, status, tgt){
     // IMPORTANT: keep meta so pct values show in UI + affect math elsewhere
     addStatus(u, name, turns, status?.meta || null);
     log(state, `${u.name} gains ${name} (${turns}t).`);
+
+    // FX: float the status name on each affected unit
+    if (fx){
+      const ref = refForUnit(state, u);
+      if (ref){
+        fx.numbers = fx.numbers || [];
+        fx.targets = fx.targets || [];
+        if (!fx.targets.some(t => t.side === ref.side && t.idx === ref.idx)) fx.targets.push(ref);
+        fx.numbers.push({
+          side: ref.side,
+          idx: ref.idx,
+          type: isNegative ? "debuff" : "buff",
+          label: name
+        });
+      }
+    }
   };
 
   // ---- Target routing ----
@@ -889,12 +971,20 @@ export function createBattleEngine({ battleDef, teamIds }){
     }
 
     const dmg = computeDamage(hero, enemy, 100);
-    applyDamage(state, enemy, dmg, { attacker: hero, skillId: "attack" });
+    const dealt = applyDamage(state, enemy, dmg, { attacker: hero, skillId: "attack" });
     hero.energy = clamp(hero.energy + 18, 0, ENERGY_MAX);
-    log(state, `${hero.name} attacks ${enemy.name} for ${dmg}.`);
+    log(state, `${hero.name} attacks ${enemy.name} for ${dealt}.`);
+
+    const fx = {
+      kind: "attack",
+      vibe: "damage",
+      from: { side: "hero", idx: state.active.idx },
+      targets: [{ side: "enemy", idx: targetIdx }],
+      numbers: [{ side: "enemy", idx: targetIdx, type: "dmg", amount: dealt }]
+    };
 
     endTurnForActive();
-    return { ok:true };
+    return { ok:true, fx };
   }
 
   function heroGuard(){
@@ -906,8 +996,16 @@ export function createBattleEngine({ battleDef, teamIds }){
     hero.energy = clamp(hero.energy + 12, 0, ENERGY_MAX);
     log(state, `${hero.name} guards.`);
 
+    const fx = {
+      kind: "guard",
+      vibe: "buff",
+      from: { side: "hero", idx: state.active.idx },
+      targets: [{ side: "hero", idx: state.active.idx }],
+      numbers: [{ side: "hero", idx: state.active.idx, type: "buff", label: "DEF Up" }]
+    };
+
     endTurnForActive();
-    return { ok:true };
+    return { ok:true, fx };
   }
 
   function heroUseSkill(skillId, target){
@@ -955,6 +1053,7 @@ export function createBattleEngine({ battleDef, teamIds }){
     }
 
     const action = enemyChooseAction(state, enemy);
+    let fx = null;
     const tIdx = pickHeroTargetForEnemy(state);
     const hero = state.heroes[tIdx];
     if (!hero){
@@ -970,21 +1069,37 @@ export function createBattleEngine({ battleDef, teamIds }){
       if (!res.ok){
         // fallback to attack
         const dmg = computeDamage(enemy, hero, 100);
-        applyDamage(state, hero, dmg, { attacker: enemy, skillId: "attack" });
+        const dealt = applyDamage(state, hero, dmg, { attacker: enemy, skillId: "attack" });
         enemy.energy = clamp(enemy.energy + 16, 0, ENERGY_MAX);
-        log(state, `${enemy.name} attacks ${hero.name} for ${dmg}.`);
+        log(state, `${enemy.name} attacks ${hero.name} for ${dealt}.`);
+        fx = {
+          kind: "attack",
+          vibe: "damage",
+          from: { side: "enemy", idx: state.active.idx },
+          targets: [{ side: "hero", idx: tIdx }],
+          numbers: [{ side: "hero", idx: tIdx, type: "dmg", amount: dealt }]
+        };
+      } else {
+        fx = res.fx || null;
       }
     } else {
       const dmg = computeDamage(enemy, hero, 100);
       // Guard effect via DEF_UP reduces dmg slightly
       const defUp = hasStatus(hero, STATUS.DEF_UP) ? 0.78 : 1;
-      applyDamage(state, hero, Math.floor(dmg * defUp), { attacker: enemy, skillId: "attack" });
+      const dealt = applyDamage(state, hero, Math.floor(dmg * defUp), { attacker: enemy, skillId: "attack" });
       enemy.energy = clamp(enemy.energy + 16, 0, ENERGY_MAX);
-      log(state, `${enemy.name} attacks ${hero.name} for ${Math.floor(dmg * defUp)}.`);
+      log(state, `${enemy.name} attacks ${hero.name} for ${dealt}.`);
+      fx = {
+        kind: "attack",
+        vibe: "damage",
+        from: { side: "enemy", idx: state.active.idx },
+        targets: [{ side: "hero", idx: tIdx }],
+        numbers: [{ side: "hero", idx: tIdx, type: "dmg", amount: dealt }]
+      };
     }
 
     endTurnForActive();
-    return { ok:true };
+    return { ok:true, fx };
   }
 
   function inferTargetFromDef(def, actorSide, fallbackIdx){

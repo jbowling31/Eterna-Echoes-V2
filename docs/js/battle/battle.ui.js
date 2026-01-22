@@ -49,6 +49,7 @@ import { openModal, closeModal } from "../ui/ui.modal.js";
 import { openTeamBuilder } from "../ui/team.builder.ui.js";
 import { getTeam, setTeam, setActiveMode, TEAM_MODES, validateTeam } from "../teams/team.builder.state.js";
 import { applyRewards } from "../economy/rewards.apply.logic.js";
+import { playActionFX, loadBattleFXEnabled, saveBattleFXEnabled } from "./battle.fx.js";
 
 const HERO_ART_BASE = "./assets/heroes/portraits/";
 const HERO_ART_TEMPLATE = "hero_{id}_p.png";
@@ -64,6 +65,10 @@ let pendingAction = null; // { kind, skillId?, label }
 let selectedTarget = { side: "enemy", idx: 0, mode: "single" }; // mode: single | all_enemies | all_allies
 let autoOn = false;
 let autoTimer = null;
+
+// Battle FX toggle + pacing
+let animsOn = loadBattleFXEnabled();
+let fxBusy = false;
 
 // Local popup state (status inspector)
 let statusOpen = null; // { name }
@@ -174,6 +179,7 @@ export function ensureBattleHost(){
 
         <div class="eeBTopRight">
           <button class="eeBMini" id="eeBAuto" title="Auto (applies to everyone)">AUTO: OFF</button>
+          <button class="eeBMini" id="eeBAnims" title="Toggle battle animations">ANIMS: ON</button>
           <button class="eeBMini" id="eeBLogBtn" title="Toggle log">LOG</button>
           <button class="eeBX" id="eeBClose" aria-label="Close">✕</button>
         </div>
@@ -182,6 +188,8 @@ export function ensureBattleHost(){
       <div class="eeBStage" id="eeBStage">
         <div class="eeBBackdrop" id="eeBBackdrop"></div>
         <div class="eeBShade"></div>
+
+        <div class="eeBFX" id="eeBFX" aria-hidden="true"></div>
 
         <div class="eeBArena">
           <div class="eeBCol eeBColHeroes" id="eeBHeroes"></div>
@@ -344,7 +352,10 @@ function beginBattle({ battleId, def, mode, teamIds }){
     sub: document.getElementById("eeBSub"),
     close: document.getElementById("eeBClose"),
     auto: document.getElementById("eeBAuto"),
+    anims: document.getElementById("eeBAnims"),
     logBtn: document.getElementById("eeBLogBtn"),
+    stage: document.getElementById("eeBStage"),
+    fx: document.getElementById("eeBFX"),
     backdrop: document.getElementById("eeBBackdrop"),
     heroes: document.getElementById("eeBHeroes"),
     enemies: document.getElementById("eeBEnemies"),
@@ -380,6 +391,16 @@ function beginBattle({ battleId, def, mode, teamIds }){
     else stopAuto();
     render();
   };
+
+  // Animations toggle (persists)
+  if (UI.anims){
+    UI.anims.textContent = animsOn ? "ANIMS: ON" : "ANIMS: OFF";
+    UI.anims.onclick = () => {
+      animsOn = !animsOn;
+      saveBattleFXEnabled(animsOn);
+      UI.anims.textContent = animsOn ? "ANIMS: ON" : "ANIMS: OFF";
+    };
+  }
 
   // Click targets when we're in target mode (ignore clicks if AoE is selected)
 UI.enemies.onclick = (ev) => {
@@ -1018,11 +1039,28 @@ if (cmd === "closeInspect"){
 
 
 
-function doExecute(action, target){
+// Play FX (movement, flashes, floating numbers) based on engine-provided summary.
+async function runFxMaybe(res){
+  if (!animsOn) return;
+  if (!res?.fx) return;
+  if (!UI?.stage) return;
+  if (fxBusy) return;
+  fxBusy = true;
+  try {
+    await playActionFX({ stageEl: UI.stage, fx: res.fx });
+  } finally {
+    fxBusy = false;
+  }
+}
+
+async function doExecute(action, target){
   if (!engine || !action) return;
+  if (fxBusy) return;
   const st = engine.state;
   const a = st.active;
   if (!a || a.side !== "hero") return;
+
+  let res = null;
 
   if (action.kind === "skill") {
     const def = getSkillDef(action.skillId);
@@ -1048,17 +1086,17 @@ else {
   }
 }
 
-engine.heroUseSkill(action.skillId, payload);
+res = engine.heroUseSkill(action.skillId, payload);
 
   }
 
   if (action.kind === "attack"){
     const idx = target?.idx ?? firstLivingEnemyIndex();
-    engine.heroAttack(idx);
+    res = engine.heroAttack(idx);
   }
 
   if (action.kind === "guard"){
-    engine.heroGuard();
+    res = engine.heroGuard();
   }
 
   uiMode = "cmd";
@@ -1066,6 +1104,8 @@ engine.heroUseSkill(action.skillId, payload);
   selectedTarget = { side:"enemy", idx:firstLivingEnemyIndex(), mode:"single" };
   render();
 
+  await runFxMaybe(res);
+  render();
   stepIfNeeded();
 }
 
@@ -1083,8 +1123,15 @@ function stepIfNeeded(){
   bindWindowEvents();
 
   if (engine.state.active?.side === "enemy"){
-    setTimeout(() => {
-      engine.stepEnemy();
+    // If FX are mid-flight, wait a beat so turns don't overlap.
+    if (fxBusy){
+      setTimeout(stepIfNeeded, 120);
+      return;
+    }
+    setTimeout(async () => {
+      const res = engine.stepEnemy();
+      render();
+      await runFxMaybe(res);
       render();
       stepIfNeeded();
     }, 380);
@@ -1100,13 +1147,20 @@ function tickAuto(){
   stopAuto();
   if (!engine || engine.state.winner) return;
 
-  autoTimer = setTimeout(() => {
+  autoTimer = setTimeout(async () => {
     if (!engine || engine.state.winner) return;
+
+    // Don't overlap turns with FX
+    if (fxBusy){
+      tickAuto();
+      return;
+    }
 
     const st = engine.state;
     const a = st.active;
 
     if (a?.side === "hero"){
+      let res = null;
       const skills = engine.getHeroSkillMenu(a.idx);
       const pick =
         skills.find(s => s.usable && !s.isUltimate && s.skillId.endsWith("_s1")) ||
@@ -1119,24 +1173,28 @@ function tickAuto(){
         const def = getSkillDef(pick.skillId);
         const tSpec = getSkillTargetSpec(def);
 
-        if (tSpec === "all_enemies") engine.heroUseSkill(pick.skillId, { side:"enemy", mode:"all_enemies" });
-        else if (tSpec === "all_allies") engine.heroUseSkill(pick.skillId, { side:"hero", mode:"all_allies" });
-        else if (tSpec === "self") engine.heroUseSkill(pick.skillId, { side:"hero", idx:a.idx });
+        if (tSpec === "all_enemies") res = engine.heroUseSkill(pick.skillId, { side:"enemy", mode:"all_enemies" });
+        else if (tSpec === "all_allies") res = engine.heroUseSkill(pick.skillId, { side:"hero", mode:"all_allies" });
+        else if (tSpec === "self") res = engine.heroUseSkill(pick.skillId, { side:"hero", idx:a.idx });
         else {
           const side = inferTargetSideForSkill(def);
-          engine.heroUseSkill(pick.skillId, { side, idx: side === "hero" ? firstLivingHeroIndex() : firstLivingEnemyIndex() });
+          res = engine.heroUseSkill(pick.skillId, { side, idx: side === "hero" ? firstLivingHeroIndex() : firstLivingEnemyIndex() });
         }
       } else {
-        engine.heroAttack(firstLivingEnemyIndex());
+        res = engine.heroAttack(firstLivingEnemyIndex());
       }
 
+      render();
+      await runFxMaybe(res);
       render();
       stepIfNeeded();
       return;
     }
 
     if (a?.side === "enemy"){
-      engine.stepEnemy();
+      const res = engine.stepEnemy();
+      render();
+      await runFxMaybe(res);
       render();
       stepIfNeeded();
     }
@@ -1330,6 +1388,88 @@ function injectStyles(){
       .eeBCommand{align-items:stretch;}
       .eeBWindow{max-width:none;}
       .eeBArena{inset:64px 0 190px 0;}
+     /* -----------------------
+   Battle FX Layer
+------------------------ */
+.eeBFX{
+  position:absolute;
+  inset:0;
+  pointer-events:none;
+  z-index:6; /* above arena + command */
+}
+
+.eeFxFlash{
+  position:absolute;
+  border-radius:18px;
+  mix-blend-mode: screen;
+  filter: blur(0.2px);
+}
+
+.eeFxFlash.vibeDmg{
+  background:
+    radial-gradient(60% 60% at 50% 50%, rgba(255,90,90,.55), transparent 70%),
+    radial-gradient(85% 70% at 45% 45%, rgba(255,255,255,.35), transparent 72%);
+}
+.eeFxFlash.vibeHeal{
+  background:
+    radial-gradient(60% 60% at 50% 50%, rgba(80,255,210,.55), transparent 70%),
+    radial-gradient(85% 70% at 45% 45%, rgba(255,255,255,.28), transparent 72%);
+}
+.eeFxFlash.vibeShield{
+  background:
+    radial-gradient(60% 60% at 50% 50%, rgba(90,170,255,.55), transparent 70%),
+    radial-gradient(85% 70% at 45% 45%, rgba(255,255,255,.22), transparent 72%);
+}
+.eeFxFlash.vibeBuff{
+  background:
+    radial-gradient(60% 60% at 50% 50%, rgba(255,210,90,.55), transparent 70%),
+    radial-gradient(85% 70% at 45% 45%, rgba(255,255,255,.22), transparent 72%);
+}
+.eeFxFlash.vibeDebuff{
+  background:
+    radial-gradient(60% 60% at 50% 50%, rgba(180,90,255,.55), transparent 70%),
+    radial-gradient(85% 70% at 45% 45%, rgba(255,255,255,.18), transparent 72%);
+}
+
+.eeFxRing{
+  position:absolute;
+  border-radius:22px;
+  border:2px solid rgba(255,255,255,.22);
+  background:
+    radial-gradient(closest-side, transparent 62%, rgba(255,255,255,.08) 70%, transparent 78%);
+  mix-blend-mode: screen;
+  filter: blur(0.15px);
+}
+
+.eeFxRing.vibeDmg{ border-color: rgba(255,90,90,.55); box-shadow: 0 0 18px rgba(255,90,90,.30); }
+.eeFxRing.vibeHeal{ border-color: rgba(80,255,210,.55); box-shadow: 0 0 18px rgba(80,255,210,.26); }
+.eeFxRing.vibeShield{ border-color: rgba(90,170,255,.55); box-shadow: 0 0 18px rgba(90,170,255,.26); }
+.eeFxRing.vibeBuff{ border-color: rgba(255,210,90,.55); box-shadow: 0 0 18px rgba(255,210,90,.22); }
+.eeFxRing.vibeDebuff{ border-color: rgba(180,90,255,.55); box-shadow: 0 0 18px rgba(180,90,255,.26); }
+
+.eeFxFloat{
+  position:absolute;
+  transform: translate(-50%, -50%);
+  font-weight:1000;
+  letter-spacing:.2px;
+  text-shadow: 0 6px 18px rgba(0,0,0,.55);
+  padding:2px 6px;
+  border-radius:10px;
+  background: rgba(0,0,0,.18);
+  border: 1px solid rgba(255,255,255,.12);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  white-space:nowrap;
+  z-index:7;
+  font-size:14px;
+}
+
+.eeFxFloat.fxDmg{ color: rgba(255,120,120,.98); }
+.eeFxFloat.fxHeal{ color: rgba(120,255,220,.98); }
+.eeFxFloat.fxShield{ color: rgba(140,190,255,.98); }
+.eeFxFloat.fxBuff{ color: rgba(255,220,140,.98); }
+.eeFxFloat.fxDebuff{ color: rgba(200,150,255,.98); }
+ 
     }
   `;
   document.head.appendChild(st);
